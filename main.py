@@ -1,7 +1,6 @@
-
 import discord
-from discord.ext import commands, tasks
 from discord import app_commands
+from discord.ext import commands, tasks
 import os
 import json
 import random
@@ -15,9 +14,21 @@ from datetime import datetime, timedelta, timezone
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN environment variable is missing.")
+    raise RuntimeError("DISCORD_TOKEN is missing from Railway Variables.")
 
 DATA_FILE = "auraguard_data.json"
+
+# =========================================================
+# AURA BRANDING
+# =========================================================
+
+AURA_PURPLE = 0x8A2BE2
+AURA_GREEN = 0x2ECC71
+AURA_RED = 0xE74C3C
+AURA_YELLOW = 0xF1C40F
+AURA_BLUE = 0x3498DB
+
+FOOTER = "AuraGuard • Powered by Aura"
 
 # =========================================================
 # INTENTS
@@ -50,7 +61,7 @@ def load_data():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {
             "settings": {},
             "warnings": {},
@@ -67,13 +78,19 @@ def save_data():
         json.dump(data, f, indent=4)
 
 
-def guild_settings(guild_id):
+def get_settings(guild_id):
     guild_id = str(guild_id)
 
     if guild_id not in data["settings"]:
         data["settings"][guild_id] = {
+            "welcome_enabled": False,
             "welcome_channel": None,
+            "welcome_message": "Welcome {user} to {server}! 🛡️",
+
+            "leave_enabled": False,
             "leave_channel": None,
+            "leave_message": "{user} has left {server}. 👋",
+
             "ticket_category": None,
             "staff_role": None,
             "log_channel": None
@@ -87,76 +104,96 @@ def guild_settings(guild_id):
 # EMBEDS
 # =========================================================
 
-def aura_embed(title, description="", color=0x8A2BE2):
+def aura_embed(
+    title,
+    description="",
+    color=AURA_PURPLE,
+    emoji="🛡️"
+):
     embed = discord.Embed(
-        title=f"🛡️ {title}",
+        title=f"{emoji} {title}",
         description=description,
-        color=color
+        color=color,
+        timestamp=datetime.now(timezone.utc)
     )
 
-    embed.set_footer(text="AuraGuard • Powered by Aura")
+    embed.set_footer(text=FOOTER)
 
     return embed
 
 
 # =========================================================
-# BOT READY
+# READY
 # =========================================================
 
 @bot.event
 async def on_ready():
-    print("====================================")
-    print(f"AuraGuard is online as {bot.user}")
+
+    print("================================")
+    print(f"AuraGuard online as {bot.user}")
     print(f"Bot ID: {bot.user.id}")
-    print("====================================")
+    print("================================")
+
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="over your server 🛡️"
+        )
+    )
 
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash commands.")
     except Exception as e:
-        print(f"Command sync error: {e}")
+        print(f"Sync error: {e}")
 
     if not giveaway_loop.is_running():
         giveaway_loop.start()
 
 
 # =========================================================
-# ERROR HANDLER
+# LOGGING
 # =========================================================
 
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error):
+async def send_log(
+    guild,
+    title,
+    description,
+    color=AURA_PURPLE
+):
 
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message(
-            embed=aura_embed(
-                "Permission Denied",
-                "You don't have permission to use this command.",
-                0xFF0000
-            ),
-            ephemeral=True
-        )
+    settings = get_settings(guild.id)
+    channel_id = settings.get("log_channel")
+
+    if not channel_id:
         return
 
-    print(f"Command error: {error}")
+    channel = guild.get_channel(channel_id)
 
-    if interaction.response.is_done():
-        await interaction.followup.send(
-            "❌ Something went wrong.",
-            ephemeral=True
+    if not channel:
+        return
+
+    try:
+        await channel.send(
+            embed=aura_embed(
+                title,
+                description,
+                color
+            )
         )
-    else:
-        await interaction.response.send_message(
-            "❌ Something went wrong.",
-            ephemeral=True
-        )
+    except discord.HTTPException:
+        pass
 
 
 # =========================================================
-# BASIC COMMANDS
+# PING
 # =========================================================
 
-@bot.tree.command(name="ping", description="Check if AuraGuard is online.")
+@bot.tree.command(
+    name="ping",
+    description="Check AuraGuard's latency."
+)
 async def ping(interaction: discord.Interaction):
 
     latency = round(bot.latency * 1000)
@@ -164,50 +201,621 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=aura_embed(
             "AuraGuard Online",
-            f"⚡ Pong!\n\nLatency: **{latency}ms**"
+            f"⚡ Pong!\n\nLatency: **{latency}ms**",
+            AURA_PURPLE,
+            "⚡"
         )
     )
 
 
-@bot.tree.command(name="help", description="Show AuraGuard commands.")
+# =========================================================
+# HELP
+# =========================================================
+
+@bot.tree.command(
+    name="help",
+    description="Show AuraGuard commands."
+)
 async def help_command(interaction: discord.Interaction):
 
     embed = aura_embed(
-        "AuraGuard Commands",
+        "AuraGuard",
         """
+**👋 Welcome**
+`/welcome setup`
+`/welcome enable`
+`/welcome disable`
+`/welcome test`
+`/welcome settings`
+
+**🚪 Leave**
+`/leave setup`
+`/leave enable`
+`/leave disable`
+`/leave test`
+`/leave settings`
+
+**🎫 Tickets**
+`/tickets setup`
+`/tickets panel`
+
+**🎉 Giveaways**
+`/giveaway start`
+`/giveaway end`
+`/giveaway reroll`
+`/giveaway entries`
+
 **🛡️ Moderation**
 `/kick`
 `/ban`
+`/unban`
 `/timeout`
+`/untimeout`
 `/warn`
 `/clear`
 
-**⚙️ Setup**
-`/setwelcome`
-`/setleave`
-`/settickets`
+**💾 Backups**
+`/backup create`
+`/backup list`
+`/backup restore`
+
+**⚙️ Server**
 `/setstaffrole`
 `/setlogchannel`
 
-**🎫 Tickets**
-`/ticketpanel`
-
-**🎉 Giveaways**
-`/giveaway`
-
-**💾 Backups**
-`/backup`
-        """
+⚡ **Powered by Aura**
+        """,
+        AURA_PURPLE,
+        "⚡"
     )
 
     await interaction.response.send_message(embed=embed)
 
 
 # =========================================================
+# WELCOME SYSTEM
+# =========================================================
+
+welcome_group = app_commands.Group(
+    name="welcome",
+    description="Manage welcome messages."
+)
+
+
+@welcome_group.command(
+    name="setup",
+    description="Set the welcome channel and message."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def welcome_setup(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    message: str = "Welcome {user} to {server}! 🛡️"
+):
+
+    settings = get_settings(interaction.guild.id)
+
+    settings["welcome_channel"] = channel.id
+    settings["welcome_message"] = message
+
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Welcome Setup",
+            f"👋 **Channel:** {channel.mention}\n\n"
+            f"**Message:**\n{message}\n\n"
+            f"**Status:** "
+            f"{'🟢 Enabled' if settings['welcome_enabled'] else '🔴 Disabled'}\n\n"
+            f"Use `/welcome enable` to turn it on.",
+            AURA_PURPLE,
+            "👋"
+        ),
+        ephemeral=True
+    )
+
+
+@welcome_group.command(
+    name="enable",
+    description="Enable welcome messages."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def welcome_enable(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    if not settings.get("welcome_channel"):
+
+        await interaction.response.send_message(
+            "❌ Run `/welcome setup` first.",
+            ephemeral=True
+        )
+        return
+
+    settings["welcome_enabled"] = True
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Welcome Enabled",
+            "🟢 AuraGuard will now welcome new members.",
+            AURA_GREEN,
+            "👋"
+        )
+    )
+
+
+@welcome_group.command(
+    name="disable",
+    description="Disable welcome messages."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def welcome_disable(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    settings["welcome_enabled"] = False
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Welcome Disabled",
+            "🔴 Welcome messages are now disabled.",
+            AURA_RED,
+            "👋"
+        )
+    )
+
+
+@welcome_group.command(
+    name="test",
+    description="Test the welcome message."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def welcome_test(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    channel_id = settings.get("welcome_channel")
+
+    if not channel_id:
+
+        await interaction.response.send_message(
+            "❌ Run `/welcome setup` first.",
+            ephemeral=True
+        )
+        return
+
+    channel = interaction.guild.get_channel(channel_id)
+
+    if not channel:
+
+        await interaction.response.send_message(
+            "❌ The configured welcome channel no longer exists.",
+            ephemeral=True
+        )
+        return
+
+    message = settings.get(
+        "welcome_message",
+        "Welcome {user} to {server}! 🛡️"
+    )
+
+    message = message.replace(
+        "{user}",
+        interaction.user.mention
+    ).replace(
+        "{server}",
+        interaction.guild.name
+    )
+
+    await channel.send(
+        embed=aura_embed(
+            "Welcome Test",
+            message,
+            AURA_PURPLE,
+            "👋"
+        )
+    )
+
+    await interaction.response.send_message(
+        f"✅ Test sent to {channel.mention}.",
+        ephemeral=True
+    )
+
+
+@welcome_group.command(
+    name="settings",
+    description="View welcome settings."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def welcome_settings(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    channel = interaction.guild.get_channel(
+        settings.get("welcome_channel")
+    )
+
+    channel_text = (
+        channel.mention
+        if channel
+        else "Not configured"
+    )
+
+    status = (
+        "🟢 Enabled"
+        if settings.get("welcome_enabled")
+        else "🔴 Disabled"
+    )
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Welcome Settings",
+            f"**Status:** {status}\n"
+            f"**Channel:** {channel_text}\n\n"
+            f"**Message:**\n"
+            f"{settings.get('welcome_message')}",
+            AURA_PURPLE,
+            "👋"
+        ),
+        ephemeral=True
+    )
+
+
+bot.tree.add_command(welcome_group)
+
+
+# =========================================================
+# LEAVE SYSTEM
+# =========================================================
+
+leave_group = app_commands.Group(
+    name="leave",
+    description="Manage leave messages."
+)
+
+
+@leave_group.command(
+    name="setup",
+    description="Set the leave channel and message."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def leave_setup(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    message: str = "{user} has left {server}. 👋"
+):
+
+    settings = get_settings(interaction.guild.id)
+
+    settings["leave_channel"] = channel.id
+    settings["leave_message"] = message
+
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Leave Setup",
+            f"🚪 **Channel:** {channel.mention}\n\n"
+            f"**Message:**\n{message}\n\n"
+            f"**Status:** "
+            f"{'🟢 Enabled' if settings['leave_enabled'] else '🔴 Disabled'}\n\n"
+            f"Use `/leave enable` to turn it on.",
+            AURA_PURPLE,
+            "🚪"
+        ),
+        ephemeral=True
+    )
+
+
+@leave_group.command(
+    name="enable",
+    description="Enable leave messages."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def leave_enable(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    if not settings.get("leave_channel"):
+
+        await interaction.response.send_message(
+            "❌ Run `/leave setup` first.",
+            ephemeral=True
+        )
+        return
+
+    settings["leave_enabled"] = True
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Leave Enabled",
+            "🟢 AuraGuard will now send leave messages.",
+            AURA_GREEN,
+            "🚪"
+        )
+    )
+
+
+@leave_group.command(
+    name="disable",
+    description="Disable leave messages."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def leave_disable(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    settings["leave_enabled"] = False
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Leave Disabled",
+            "🔴 Leave messages are now disabled.",
+            AURA_RED,
+            "🚪"
+        )
+    )
+
+
+@leave_group.command(
+    name="test",
+    description="Test the leave message."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def leave_test(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    channel_id = settings.get("leave_channel")
+
+    if not channel_id:
+
+        await interaction.response.send_message(
+            "❌ Run `/leave setup` first.",
+            ephemeral=True
+        )
+        return
+
+    channel = interaction.guild.get_channel(channel_id)
+
+    if not channel:
+
+        await interaction.response.send_message(
+            "❌ The configured leave channel no longer exists.",
+            ephemeral=True
+        )
+        return
+
+    message = settings.get(
+        "leave_message",
+        "{user} has left {server}. 👋"
+    )
+
+    message = message.replace(
+        "{user}",
+        interaction.user.mention
+    ).replace(
+        "{server}",
+        interaction.guild.name
+    )
+
+    await channel.send(
+        embed=aura_embed(
+            "Leave Test",
+            message,
+            AURA_YELLOW,
+            "🚪"
+        )
+    )
+
+    await interaction.response.send_message(
+        f"✅ Test sent to {channel.mention}.",
+        ephemeral=True
+    )
+
+
+@leave_group.command(
+    name="settings",
+    description="View leave settings."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def leave_settings(interaction: discord.Interaction):
+
+    settings = get_settings(interaction.guild.id)
+
+    channel = interaction.guild.get_channel(
+        settings.get("leave_channel")
+    )
+
+    channel_text = (
+        channel.mention
+        if channel
+        else "Not configured"
+    )
+
+    status = (
+        "🟢 Enabled"
+        if settings.get("leave_enabled")
+        else "🔴 Disabled"
+    )
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Leave Settings",
+            f"**Status:** {status}\n"
+            f"**Channel:** {channel_text}\n\n"
+            f"**Message:**\n"
+            f"{settings.get('leave_message')}",
+            AURA_PURPLE,
+            "🚪"
+        ),
+        ephemeral=True
+    )
+
+
+bot.tree.add_command(leave_group)
+
+
+# =========================================================
+# MEMBER JOIN / LEAVE
+# =========================================================
+
+@bot.event
+async def on_member_join(member):
+
+    settings = get_settings(member.guild.id)
+
+    if not settings.get("welcome_enabled"):
+        return
+
+    channel_id = settings.get("welcome_channel")
+
+    if not channel_id:
+        return
+
+    channel = member.guild.get_channel(channel_id)
+
+    if not channel:
+        return
+
+    message = settings.get(
+        "welcome_message",
+        "Welcome {user} to {server}! 🛡️"
+    )
+
+    message = message.replace(
+        "{user}",
+        member.mention
+    ).replace(
+        "{server}",
+        member.guild.name
+    )
+
+    try:
+        await channel.send(
+            embed=aura_embed(
+                "Welcome!",
+                message,
+                AURA_PURPLE,
+                "👋"
+            )
+        )
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_member_remove(member):
+
+    settings = get_settings(member.guild.id)
+
+    if not settings.get("leave_enabled"):
+        return
+
+    channel_id = settings.get("leave_channel")
+
+    if not channel_id:
+        return
+
+    channel = member.guild.get_channel(channel_id)
+
+    if not channel:
+        return
+
+    message = settings.get(
+        "leave_message",
+        "{user} has left {server}. 👋"
+    )
+
+    message = message.replace(
+        "{user}",
+        str(member)
+    ).replace(
+        "{server}",
+        member.guild.name
+    )
+
+    try:
+        await channel.send(
+            embed=aura_embed(
+                "Member Left",
+                message,
+                AURA_YELLOW,
+                "🚪"
+            )
+        )
+    except discord.HTTPException:
+        pass
+
+
+# =========================================================
+# STAFF ROLE / LOG CHANNEL
+# =========================================================
+
+@bot.tree.command(
+    name="setstaffrole",
+    description="Set AuraGuard's staff role."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setstaffrole(
+    interaction: discord.Interaction,
+    role: discord.Role
+):
+
+    settings = get_settings(interaction.guild.id)
+
+    settings["staff_role"] = role.id
+
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Staff Role Set",
+            f"🛡️ Staff role: {role.mention}",
+            AURA_GREEN,
+            "🛡️"
+        )
+    )
+
+
+@bot.tree.command(
+    name="setlogchannel",
+    description="Set the moderation log channel."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setlogchannel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+
+    settings = get_settings(interaction.guild.id)
+
+    settings["log_channel"] = channel.id
+
+    save_data()
+
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "Log Channel Set",
+            f"📋 Logs will be sent to {channel.mention}.",
+            AURA_GREEN,
+            "📋"
+        )
+    )
+
+
+# =========================================================
 # MODERATION
 # =========================================================
 
-@bot.tree.command(name="kick", description="Kick a member.")
+@bot.tree.command(
+    name="kick",
+    description="Kick a member."
+)
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(
     interaction: discord.Interaction,
@@ -216,6 +824,7 @@ async def kick(
 ):
 
     if member == interaction.user:
+
         await interaction.response.send_message(
             "❌ You can't kick yourself.",
             ephemeral=True
@@ -223,24 +832,40 @@ async def kick(
         return
 
     try:
+
         await member.kick(reason=reason)
 
         await interaction.response.send_message(
             embed=aura_embed(
                 "Member Kicked",
-                f"👢 {member.mention} was kicked.\n\n"
-                f"**Reason:** {reason}"
+                f"👢 {member.mention}\n\n"
+                f"**Reason:** {reason}",
+                AURA_RED,
+                "👢"
             )
         )
 
+        await send_log(
+            interaction.guild,
+            "Member Kicked",
+            f"**Member:** {member}\n"
+            f"**Moderator:** {interaction.user.mention}\n"
+            f"**Reason:** {reason}",
+            AURA_RED
+        )
+
     except discord.Forbidden:
+
         await interaction.response.send_message(
-            "❌ I don't have permission to kick that member.",
+            "❌ I can't kick that member.",
             ephemeral=True
         )
 
 
-@bot.tree.command(name="ban", description="Ban a member.")
+@bot.tree.command(
+    name="ban",
+    description="Ban a member."
+)
 @app_commands.checks.has_permissions(ban_members=True)
 async def ban(
     interaction: discord.Interaction,
@@ -249,24 +874,80 @@ async def ban(
 ):
 
     try:
+
         await member.ban(reason=reason)
 
         await interaction.response.send_message(
             embed=aura_embed(
                 "Member Banned",
-                f"🔨 {member.mention} was banned.\n\n"
-                f"**Reason:** {reason}"
+                f"🔨 {member.mention}\n\n"
+                f"**Reason:** {reason}",
+                AURA_RED,
+                "🔨"
             )
         )
 
+        await send_log(
+            interaction.guild,
+            "Member Banned",
+            f"**Member:** {member}\n"
+            f"**Moderator:** {interaction.user.mention}\n"
+            f"**Reason:** {reason}",
+            AURA_RED
+        )
+
     except discord.Forbidden:
+
         await interaction.response.send_message(
-            "❌ I don't have permission to ban that member.",
+            "❌ I can't ban that member.",
             ephemeral=True
         )
 
 
-@bot.tree.command(name="timeout", description="Timeout a member.")
+@bot.tree.command(
+    name="unban",
+    description="Unban a user by ID."
+)
+@app_commands.checks.has_permissions(ban_members=True)
+async def unban(
+    interaction: discord.Interaction,
+    user_id: str
+):
+
+    try:
+
+        user = await bot.fetch_user(int(user_id))
+
+        await interaction.guild.unban(user)
+
+        await interaction.response.send_message(
+            embed=aura_embed(
+                "User Unbanned",
+                f"🔓 {user} has been unbanned.",
+                AURA_GREEN,
+                "🔓"
+            )
+        )
+
+    except (ValueError, discord.NotFound):
+
+        await interaction.response.send_message(
+            "❌ User not found or isn't banned.",
+            ephemeral=True
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ I can't unban that user.",
+            ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="timeout",
+    description="Timeout a member."
+)
 @app_commands.checks.has_permissions(moderate_members=True)
 async def timeout(
     interaction: discord.Interaction,
@@ -276,62 +957,124 @@ async def timeout(
 ):
 
     if minutes < 1 or minutes > 40320:
+
         await interaction.response.send_message(
-            "❌ Timeout must be between 1 minute and 28 days.",
+            "❌ Choose between 1 minute and 28 days.",
             ephemeral=True
         )
         return
 
-    until = discord.utils.utcnow() + timedelta(minutes=minutes)
+    until = discord.utils.utcnow() + timedelta(
+        minutes=minutes
+    )
 
     try:
-        await member.timeout(until, reason=reason)
+
+        await member.timeout(
+            until,
+            reason=reason
+        )
 
         await interaction.response.send_message(
             embed=aura_embed(
                 "Member Timed Out",
-                f"⏳ {member.mention} was timed out for "
-                f"**{minutes} minutes**."
+                f"⏳ {member.mention}\n"
+                f"**Duration:** {minutes} minutes\n"
+                f"**Reason:** {reason}",
+                AURA_YELLOW,
+                "⏳"
             )
         )
 
     except discord.Forbidden:
+
         await interaction.response.send_message(
-            "❌ I don't have permission to timeout that member.",
+            "❌ I can't timeout that member.",
             ephemeral=True
         )
 
 
-@bot.tree.command(name="clear", description="Delete messages.")
-@app_commands.checks.has_permissions(manage_messages=True)
+@bot.tree.command(
+    name="untimeout",
+    description="Remove a member's timeout."
+)
+@app_commands.checks.has_permissions(moderate_members=True)
+async def untimeout(
+    interaction: discord.Interaction,
+    member: discord.Member
+):
+
+    try:
+
+        await member.timeout(None)
+
+        await interaction.response.send_message(
+            embed=aura_embed(
+                "Timeout Removed",
+                f"🔓 {member.mention} can speak again.",
+                AURA_GREEN,
+                "🔓"
+            )
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ I can't remove that timeout.",
+            ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="clear",
+    description="Delete messages."
+)
+@app_commands.checks.has_permissions(
+    manage_messages=True
+)
 async def clear(
     interaction: discord.Interaction,
     amount: int
 ):
 
     if amount < 1 or amount > 100:
+
         await interaction.response.send_message(
-            "❌ Choose a number between 1 and 100.",
+            "❌ Choose between 1 and 100.",
             ephemeral=True
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(
+        ephemeral=True
+    )
 
-    deleted = await interaction.channel.purge(limit=amount)
+    deleted = await interaction.channel.purge(
+        limit=amount
+    )
 
     await interaction.followup.send(
-        f"🧹 Deleted **{len(deleted)}** messages.",
+        embed=aura_embed(
+            "Messages Cleared",
+            f"🧹 Deleted **{len(deleted)}** messages.",
+            AURA_GREEN,
+            "🧹"
+        ),
         ephemeral=True
     )
 
 
 # =========================================================
-# WARNINGS
+# WARN
 # =========================================================
 
-@bot.tree.command(name="warn", description="Warn a member.")
-@app_commands.checks.has_permissions(moderate_members=True)
+@bot.tree.command(
+    name="warn",
+    description="Warn a member."
+)
+@app_commands.checks.has_permissions(
+    moderate_members=True
+)
 async def warn(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -350,138 +1093,25 @@ async def warn(
     data["warnings"][guild_id][user_id].append({
         "reason": reason,
         "moderator": interaction.user.id,
-        "time": datetime.now(timezone.utc).isoformat()
+        "time": datetime.now(
+            timezone.utc
+        ).isoformat()
     })
 
     save_data()
 
-    count = len(data["warnings"][guild_id][user_id])
+    count = len(
+        data["warnings"][guild_id][user_id]
+    )
 
     await interaction.response.send_message(
         embed=aura_embed(
             "Warning Issued",
-            f"⚠️ {member.mention} has been warned.\n\n"
+            f"⚠️ {member.mention}\n\n"
             f"**Reason:** {reason}\n"
-            f"**Total warnings:** {count}"
-        )
-    )
-
-
-# =========================================================
-# SERVER SETUP
-# =========================================================
-
-@bot.tree.command(name="setwelcome", description="Set the welcome channel.")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setwelcome(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-
-    settings = guild_settings(interaction.guild.id)
-    settings["welcome_channel"] = channel.id
-    save_data()
-
-    await interaction.response.send_message(
-        f"👋 Welcome messages will now be sent in {channel.mention}."
-    )
-
-
-@bot.tree.command(name="setleave", description="Set the leave channel.")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setleave(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-
-    settings = guild_settings(interaction.guild.id)
-    settings["leave_channel"] = channel.id
-    save_data()
-
-    await interaction.response.send_message(
-        f"🚪 Leave messages will now be sent in {channel.mention}."
-    )
-
-
-@bot.tree.command(name="setstaffrole", description="Set the staff role.")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setstaffrole(
-    interaction: discord.Interaction,
-    role: discord.Role
-):
-
-    settings = guild_settings(interaction.guild.id)
-    settings["staff_role"] = role.id
-    save_data()
-
-    await interaction.response.send_message(
-        f"🛡️ Staff role set to {role.mention}."
-    )
-
-
-@bot.tree.command(name="setlogchannel", description="Set the moderation log channel.")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setlogchannel(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-
-    settings = guild_settings(interaction.guild.id)
-    settings["log_channel"] = channel.id
-    save_data()
-
-    await interaction.response.send_message(
-        f"📋 Log channel set to {channel.mention}."
-    )
-
-
-# =========================================================
-# WELCOME / LEAVE
-# =========================================================
-
-@bot.event
-async def on_member_join(member):
-
-    settings = guild_settings(member.guild.id)
-
-    channel_id = settings.get("welcome_channel")
-
-    if not channel_id:
-        return
-
-    channel = member.guild.get_channel(channel_id)
-
-    if not channel:
-        return
-
-    await channel.send(
-        embed=aura_embed(
-            "Welcome!",
-            f"👋 Welcome {member.mention} to **{member.guild.name}**!\n\n"
-            f"Enjoy your stay! 🛡️"
-        )
-    )
-
-
-@bot.event
-async def on_member_remove(member):
-
-    settings = guild_settings(member.guild.id)
-
-    channel_id = settings.get("leave_channel")
-
-    if not channel_id:
-        return
-
-    channel = member.guild.get_channel(channel_id)
-
-    if not channel:
-        return
-
-    await channel.send(
-        embed=aura_embed(
-            "Member Left",
-            f"🚪 **{member}** has left the server."
+            f"**Warnings:** {count}",
+            AURA_YELLOW,
+            "⚠️"
         )
     )
 
@@ -510,65 +1140,68 @@ class TicketView(discord.ui.View):
         guild = interaction.guild
         user = interaction.user
 
-        settings = guild_settings(guild.id)
-
-        category = None
-
-        if settings.get("ticket_category"):
-            category = guild.get_channel(
-                settings["ticket_category"]
-            )
-
         existing = discord.utils.get(
             guild.text_channels,
             name=f"ticket-{user.id}"
         )
 
         if existing:
+
             await interaction.response.send_message(
-                f"🎫 You already have a ticket: {existing.mention}",
+                f"🎫 You already have {existing.mention}.",
                 ephemeral=True
             )
             return
 
+        settings = get_settings(guild.id)
+
+        category = guild.get_channel(
+            settings.get("ticket_category")
+        )
+
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(
-                view_channel=False
-            ),
-            user: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-        }
-
-        staff_role_id = settings.get("staff_role")
-
-        if staff_role_id:
-            staff_role = guild.get_role(staff_role_id)
-
-            if staff_role:
-                overwrites[staff_role] = discord.PermissionOverwrite(
+            guild.default_role:
+                discord.PermissionOverwrite(
+                    view_channel=False
+                ),
+            user:
+                discord.PermissionOverwrite(
                     view_channel=True,
                     send_messages=True,
                     read_message_history=True
                 )
+        }
+
+        staff_role = guild.get_role(
+            settings.get("staff_role")
+        )
+
+        if staff_role:
+
+            overwrites[staff_role] = (
+                discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True
+                )
+            )
 
         channel = await guild.create_text_channel(
-            name=f"ticket-{user.id}",
-            overwrites=overwrites,
+            f"ticket-{user.id}",
             category=category,
+            overwrites=overwrites,
             reason="AuraGuard ticket"
         )
 
         await channel.send(
-            content=user.mention,
             embed=aura_embed(
                 "Ticket Opened",
-                "🎫 Thanks for opening a ticket!\n\n"
-                "A staff member will help you shortly."
+                f"Welcome {user.mention}!\n\n"
+                "A staff member will help you soon.",
+                AURA_PURPLE,
+                "🎫"
             ),
-            view=CloseTicketView()
+            view=TicketControls()
         )
 
         await interaction.response.send_message(
@@ -577,25 +1210,86 @@ class TicketView(discord.ui.View):
         )
 
 
-class CloseTicketView(discord.ui.View):
+class TicketControls(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="Close Ticket",
-        style=discord.ButtonStyle.danger,
-        emoji="🔒",
-        custom_id="auraguard_close_ticket"
+        label="Claim",
+        style=discord.ButtonStyle.success,
+        emoji="🙋",
+        custom_id="auraguard_claim"
     )
-    async def close_ticket(
+    async def claim(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
 
+        settings = get_settings(
+            interaction.guild.id
+        )
+
+        role = interaction.guild.get_role(
+            settings.get("staff_role")
+        )
+
+        if not role or role not in interaction.user.roles:
+
+            await interaction.response.send_message(
+                "❌ Only staff can claim tickets.",
+                ephemeral=True
+            )
+            return
+
         await interaction.response.send_message(
-            "🔒 This ticket will be deleted in 5 seconds."
+            embed=aura_embed(
+                "Ticket Claimed",
+                f"🙋 Claimed by {interaction.user.mention}.",
+                AURA_GREEN,
+                "🙋"
+            )
+        )
+
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.danger,
+        emoji="🔒",
+        custom_id="auraguard_close"
+    )
+    async def close(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        settings = get_settings(
+            interaction.guild.id
+        )
+
+        role = interaction.guild.get_role(
+            settings.get("staff_role")
+        )
+
+        if (
+            not role
+            or role not in interaction.user.roles
+        ) and not interaction.user.guild_permissions.manage_channels:
+
+            await interaction.response.send_message(
+                "❌ Only staff can close tickets.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            embed=aura_embed(
+                "Ticket Closing",
+                "🔒 Closing in **5 seconds**.",
+                AURA_RED,
+                "🔒"
+            )
         )
 
         await asyncio.sleep(5)
@@ -604,39 +1298,66 @@ class CloseTicketView(discord.ui.View):
             await interaction.channel.delete(
                 reason="AuraGuard ticket closed"
             )
-        except:
+        except discord.HTTPException:
             pass
 
 
-@bot.tree.command(name="settickets", description="Set the ticket category.")
+tickets_group = app_commands.Group(
+    name="tickets",
+    description="Manage AuraGuard tickets."
+)
+
+
+@tickets_group.command(
+    name="setup",
+    description="Set the ticket category."
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def settickets(
+async def tickets_setup(
     interaction: discord.Interaction,
     category: discord.CategoryChannel
 ):
 
-    settings = guild_settings(interaction.guild.id)
+    settings = get_settings(
+        interaction.guild.id
+    )
 
     settings["ticket_category"] = category.id
 
     save_data()
 
     await interaction.response.send_message(
-        f"🎫 Ticket category set to **{category.name}**."
+        embed=aura_embed(
+            "Tickets Setup",
+            f"🎫 Category: **{category.name}**",
+            AURA_GREEN,
+            "🎫"
+        )
     )
 
 
-@bot.tree.command(name="ticketpanel", description="Create the ticket panel.")
+@tickets_group.command(
+    name="panel",
+    description="Send the ticket panel."
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def ticketpanel(interaction: discord.Interaction):
+async def tickets_panel(
+    interaction: discord.Interaction
+):
 
     await interaction.response.send_message(
         embed=aura_embed(
             "Support Tickets",
-            "Need help? Click the button below to open a private ticket."
+            "Need help?\n\n"
+            "Click **Open Ticket** below.",
+            AURA_PURPLE,
+            "🎫"
         ),
         view=TicketView()
     )
+
+
+bot.tree.add_command(tickets_group)
 
 
 # =========================================================
@@ -663,7 +1384,7 @@ class GiveawayView(discord.ui.View):
         button: discord.ui.Button
     ):
 
-        gid = str(self.giveaway_id)
+        gid = self.giveaway_id
 
         if gid not in giveaway_entries:
             giveaway_entries[gid] = {}
@@ -671,56 +1392,52 @@ class GiveawayView(discord.ui.View):
         user_id = str(interaction.user.id)
 
         if user_id in giveaway_entries[gid]:
+
             await interaction.response.send_message(
-                "❌ You're already entered!",
+                "❌ You're already entered.",
                 ephemeral=True
             )
             return
 
-        settings = data["giveaways"].get(gid, {})
-
-        entries = 1
-
-        bonus_roles = settings.get("bonus_roles", {})
-
-        for role in interaction.user.roles:
-            bonus = bonus_roles.get(str(role.id), 0)
-            entries += bonus
-
-        giveaway_entries[gid][user_id] = entries
+        giveaway_entries[gid][user_id] = 1
 
         await interaction.response.send_message(
-            f"🎉 You're entered with **{entries} entries**!",
+            "🎉 You're entered with **1 entry**!",
             ephemeral=True
         )
 
 
-@bot.tree.command(name="giveaway", description="Create a giveaway.")
+giveaway_group = app_commands.Group(
+    name="giveaway",
+    description="Manage giveaways."
+)
+
+
+@giveaway_group.command(
+    name="start",
+    description="Start a giveaway."
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def giveaway(
+async def giveaway_start(
     interaction: discord.Interaction,
     prize: str,
     minutes: int,
     winners: int = 1
 ):
 
-    if minutes < 1:
+    if minutes < 1 or winners < 1:
+
         await interaction.response.send_message(
-            "❌ Giveaway duration must be at least 1 minute.",
+            "❌ Minutes and winners must be at least 1.",
             ephemeral=True
         )
         return
 
-    if winners < 1:
-        await interaction.response.send_message(
-            "❌ There must be at least 1 winner.",
-            ephemeral=True
-        )
-        return
+    giveaway_id = str(
+        random.randint(100000, 999999)
+    )
 
-    giveaway_id = str(random.randint(100000, 999999))
-
-    end_time = (
+    end = (
         datetime.now(timezone.utc)
         + timedelta(minutes=minutes)
     )
@@ -730,25 +1447,161 @@ async def giveaway(
         "channel": interaction.channel.id,
         "prize": prize,
         "winners": winners,
-        "end_time": end_time.isoformat()
+        "end_time": end.isoformat()
     }
 
     giveaway_entries[giveaway_id] = {}
 
     save_data()
 
-    embed = aura_embed(
-        "🎉 GIVEAWAY",
-        f"**Prize:** {prize}\n"
-        f"**Winners:** {winners}\n"
-        f"**Ends:** <t:{int(end_time.timestamp())}:R>\n\n"
-        f"Click the button below to enter!"
+    await interaction.response.send_message(
+        embed=aura_embed(
+            "GIVEAWAY",
+            f"🎁 **Prize:** {prize}\n"
+            f"🏆 **Winners:** {winners}\n"
+            f"⏰ **Ends:** <t:{int(end.timestamp())}:R>\n\n"
+            f"Click below to enter!",
+            AURA_PURPLE,
+            "🎉"
+        ),
+        view=GiveawayView(giveaway_id)
+    )
+
+
+@giveaway_group.command(
+    name="end",
+    description="End a giveaway."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_end(
+    interaction: discord.Interaction,
+    giveaway_id: str
+):
+
+    giveaway = data["giveaways"].get(giveaway_id)
+
+    if not giveaway:
+
+        await interaction.response.send_message(
+            "❌ Giveaway not found.",
+            ephemeral=True
+        )
+        return
+
+    entries = giveaway_entries.get(
+        giveaway_id,
+        {}
+    )
+
+    if not entries:
+
+        await interaction.response.send_message(
+            "🎉 Giveaway ended, but nobody entered."
+        )
+
+    else:
+
+        count = min(
+            giveaway["winners"],
+            len(entries)
+        )
+
+        winners = random.sample(
+            list(entries.keys()),
+            count
+        )
+
+        mentions = " ".join(
+            f"<@{x}>"
+            for x in winners
+        )
+
+        await interaction.response.send_message(
+            embed=aura_embed(
+                "Giveaway Winner!",
+                f"🎁 **Prize:** {giveaway['prize']}\n\n"
+                f"🏆 {mentions}",
+                AURA_GREEN,
+                "🏆"
+            )
+        )
+
+    data["giveaways"].pop(
+        giveaway_id,
+        None
+    )
+
+    giveaway_entries.pop(
+        giveaway_id,
+        None
+    )
+
+    save_data()
+
+
+@giveaway_group.command(
+    name="reroll",
+    description="Reroll a giveaway."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_reroll(
+    interaction: discord.Interaction,
+    giveaway_id: str
+):
+
+    entries = giveaway_entries.get(
+        giveaway_id,
+        {}
+    )
+
+    if not entries:
+
+        await interaction.response.send_message(
+            "❌ No entries found.",
+            ephemeral=True
+        )
+        return
+
+    winner = random.choice(
+        list(entries.keys())
     )
 
     await interaction.response.send_message(
-        embed=embed,
-        view=GiveawayView(giveaway_id)
+        embed=aura_embed(
+            "Giveaway Reroll",
+            f"🔄 New winner: <@{winner}>",
+            AURA_GREEN,
+            "🔄"
+        )
     )
+
+
+@giveaway_group.command(
+    name="entries",
+    description="Check your giveaway entries."
+)
+async def giveaway_entries_command(
+    interaction: discord.Interaction,
+    giveaway_id: str
+):
+
+    entries = giveaway_entries.get(
+        giveaway_id,
+        {}
+    )
+
+    amount = entries.get(
+        str(interaction.user.id),
+        0
+    )
+
+    await interaction.response.send_message(
+        f"🎟️ You have **{amount} entries**.",
+        ephemeral=True
+    )
+
+
+bot.tree.add_command(giveaway_group)
 
 
 # =========================================================
@@ -762,100 +1615,88 @@ async def giveaway_loop():
 
     finished = []
 
-    for giveaway_id, giveaway_data in list(
+    for gid, giveaway in list(
         data["giveaways"].items()
     ):
 
-        end_time = datetime.fromisoformat(
-            giveaway_data["end_time"]
+        end = datetime.fromisoformat(
+            giveaway["end_time"]
         )
 
-        if now < end_time:
+        if now < end:
             continue
 
-        guild = bot.get_guild(giveaway_data["guild"])
+        guild = bot.get_guild(
+            giveaway["guild"]
+        )
 
         if not guild:
-            finished.append(giveaway_id)
+            finished.append(gid)
             continue
 
         channel = guild.get_channel(
-            giveaway_data["channel"]
+            giveaway["channel"]
         )
 
         if not channel:
-            finished.append(giveaway_id)
+            finished.append(gid)
             continue
 
         entries = giveaway_entries.get(
-            giveaway_id,
+            gid,
             {}
         )
 
-        if not entries:
+        if entries:
+
+            count = min(
+                giveaway["winners"],
+                len(entries)
+            )
+
+            winners = random.sample(
+                list(entries.keys()),
+                count
+            )
+
+            mentions = " ".join(
+                f"<@{x}>"
+                for x in winners
+            )
+
+            await channel.send(
+                embed=aura_embed(
+                    "Giveaway Winner!",
+                    f"🎁 **Prize:** {giveaway['prize']}\n\n"
+                    f"🏆 {mentions}",
+                    AURA_GREEN,
+                    "🏆"
+                )
+            )
+
+        else:
 
             await channel.send(
                 embed=aura_embed(
                     "Giveaway Ended",
-                    f"🎉 **{giveaway_data['prize']}**\n\n"
-                    "Nobody entered the giveaway."
+                    f"🎁 **{giveaway['prize']}**\n\n"
+                    "Nobody entered.",
+                    AURA_YELLOW,
+                    "🎉"
                 )
             )
 
-            finished.append(giveaway_id)
-            continue
+        finished.append(gid)
 
-        weighted_users = []
-
-        for user_id, entry_count in entries.items():
-
-            weighted_users.extend(
-                [user_id] * entry_count
-            )
-
-        winners = []
-
-        for _ in range(
-            min(
-                giveaway_data["winners"],
-                len(set(entries.keys()))
-            )
-        ):
-
-            if not weighted_users:
-                break
-
-            chosen = random.choice(weighted_users)
-
-            while chosen in winners:
-                chosen = random.choice(weighted_users)
-
-            winners.append(chosen)
-
-        mentions = []
-
-        for winner_id in winners:
-            mentions.append(f"<@{winner_id}>")
-
-        await channel.send(
-            embed=aura_embed(
-                "🎉 Giveaway Winner!",
-                f"**Prize:** {giveaway_data['prize']}\n\n"
-                f"🏆 Winner(s): {', '.join(mentions)}"
-            )
-        )
-
-        finished.append(giveaway_id)
-
-    for giveaway_id in finished:
+    for gid in finished:
 
         data["giveaways"].pop(
-            giveaway_id,
+            gid,
             None
         )
 
         giveaway_entries.pop(
-            giveaway_id,
+            gid,
             None
         )
 
@@ -864,28 +1705,38 @@ async def giveaway_loop():
 
 
 # =========================================================
-# BACKUP SYSTEM
+# BACKUPS
 # =========================================================
 
-@bot.tree.command(name="backup-create", description="Create a server backup.")
-@app_commands.checks.has_permissions(administrator=True)
-async def backup_create(interaction: discord.Interaction):
+backup_group = app_commands.Group(
+    name="backup",
+    description="Manage server backups."
+)
 
-    await interaction.response.defer(ephemeral=True)
+
+@backup_group.command(
+    name="create",
+    description="Create a server structure backup."
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def backup_create(
+    interaction: discord.Interaction
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
 
     guild = interaction.guild
 
     backup = {
-        "name": f"Backup {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "guild_name": guild.name,
+        "name": datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
         "roles": [],
         "categories": [],
         "channels": []
     }
-
-    # -----------------------------
-    # ROLES
-    # -----------------------------
 
     for role in guild.roles:
 
@@ -897,91 +1748,83 @@ async def backup_create(interaction: discord.Interaction):
             "permissions": role.permissions.value,
             "color": role.color.value,
             "hoist": role.hoist,
-            "mentionable": role.mentionable,
-            "position": role.position
+            "mentionable": role.mentionable
         })
-
-    # -----------------------------
-    # CATEGORIES
-    # -----------------------------
 
     for category in guild.categories:
 
         backup["categories"].append({
-            "name": category.name,
-            "position": category.position
+            "name": category.name
         })
-
-        for channel in category.channels:
-
-            if isinstance(channel, discord.TextChannel):
-
-                backup["channels"].append({
-                    "name": channel.name,
-                    "type": "text",
-                    "category": category.name,
-                    "position": channel.position,
-                    "topic": channel.topic,
-                    "slowmode": channel.slowmode_delay
-                })
-
-            elif isinstance(channel, discord.VoiceChannel):
-
-                backup["channels"].append({
-                    "name": channel.name,
-                    "type": "voice",
-                    "category": category.name,
-                    "position": channel.position
-                })
-
-    # -----------------------------
-    # NO CATEGORY CHANNELS
-    # -----------------------------
 
     for channel in guild.channels:
 
-        if isinstance(channel, discord.TextChannel):
+        if isinstance(
+            channel,
+            discord.TextChannel
+        ):
 
-            if channel.category is None:
+            backup["channels"].append({
+                "name": channel.name,
+                "type": "text",
+                "category": (
+                    channel.category.name
+                    if channel.category
+                    else None
+                ),
+                "topic": channel.topic
+            })
 
-                backup["channels"].append({
-                    "name": channel.name,
-                    "type": "text",
-                    "category": None,
-                    "position": channel.position,
-                    "topic": channel.topic,
-                    "slowmode": channel.slowmode_delay
-                })
+        elif isinstance(
+            channel,
+            discord.VoiceChannel
+        ):
+
+            backup["channels"].append({
+                "name": channel.name,
+                "type": "voice",
+                "category": (
+                    channel.category.name
+                    if channel.category
+                    else None
+                )
+            })
 
     backup_id = str(
         random.randint(100000, 999999)
     )
 
-    if str(guild.id) not in data["backups"]:
-        data["backups"][str(guild.id)] = {}
+    gid = str(guild.id)
 
-    data["backups"][str(guild.id)][backup_id] = backup
+    if gid not in data["backups"]:
+        data["backups"][gid] = {}
+
+    data["backups"][gid][backup_id] = backup
 
     save_data()
 
     await interaction.followup.send(
         embed=aura_embed(
             "Backup Created",
-            f"💾 Backup ID: **{backup_id}**\n\n"
-            f"Saved **{len(backup['roles'])} roles**\n"
-            f"Saved **{len(backup['channels'])} channels**"
+            f"💾 **Backup ID:** `{backup_id}`\n\n"
+            f"🛡️ Roles: **{len(backup['roles'])}**\n"
+            f"📁 Categories: **{len(backup['categories'])}**\n"
+            f"📋 Channels: **{len(backup['channels'])}**",
+            AURA_GREEN,
+            "💾"
         ),
         ephemeral=True
     )
 
 
-# =========================================================
-# LIST BACKUPS
-# =========================================================
-
-@bot.tree.command(name="backup-list", description="List server backups.")
+@backup_group.command(
+    name="list",
+    description="List your server backups."
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def backup_list(interaction: discord.Interaction):
+async def backup_list(
+    interaction: discord.Interaction
+):
 
     backups = data["backups"].get(
         str(interaction.guild.id),
@@ -989,37 +1832,36 @@ async def backup_list(interaction: discord.Interaction):
     )
 
     if not backups:
+
         await interaction.response.send_message(
             "💾 No backups found.",
             ephemeral=True
         )
         return
 
-    description = ""
+    text = ""
 
     for backup_id, backup in backups.items():
 
-        description += (
-            f"**{backup_id}** — "
+        text += (
+            f"💾 `{backup_id}` — "
             f"{backup['name']}\n"
         )
 
     await interaction.response.send_message(
         embed=aura_embed(
-            "Server Backups",
-            description
+            "AuraGuard Backups",
+            text,
+            AURA_PURPLE,
+            "💾"
         ),
         ephemeral=True
     )
 
 
-# =========================================================
-# BACKUP RESTORE
-# =========================================================
-
-@bot.tree.command(
-    name="backup-restore",
-    description="Restore a server backup."
+@backup_group.command(
+    name="restore",
+    description="Restore a backup safely."
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def backup_restore(
@@ -1027,145 +1869,33 @@ async def backup_restore(
     backup_id: str
 ):
 
-    await interaction.response.defer(ephemeral=True)
-
-    guild_id = str(interaction.guild.id)
-
-    backups = data["backups"].get(
-        guild_id,
-        {}
-    )
-
-    backup = backups.get(backup_id)
-
-    if not backup:
-        await interaction.followup.send(
-            "❌ Backup not found.",
-            ephemeral=True
-        )
-        return
-
-    guild = interaction.guild
-
-    # -----------------------------
-    # CREATE ROLES
-    # -----------------------------
-
-    existing_roles = {
-        role.name: role
-        for role in guild.roles
-    }
-
-    for role_data in backup["roles"]:
-
-        if role_data["name"] in existing_roles:
-            continue
-
-        try:
-
-            await guild.create_role(
-                name=role_data["name"],
-                permissions=discord.Permissions(
-                    role_data["permissions"]
-                ),
-                colour=discord.Colour(
-                    role_data["color"]
-                ),
-                hoist=role_data["hoist"],
-                mentionable=role_data["mentionable"],
-                reason="AuraGuard backup restore"
-            )
-
-        except discord.Forbidden:
-            pass
-
-    # -----------------------------
-    # CREATE CATEGORIES
-    # -----------------------------
-
-    existing_categories = {
-        category.name: category
-        for category in guild.categories
-    }
-
-    for category_data in backup["categories"]:
-
-        if category_data["name"] in existing_categories:
-            continue
-
-        try:
-
-            category = await guild.create_category(
-                category_data["name"],
-                reason="AuraGuard backup restore"
-            )
-
-            existing_categories[
-                category_data["name"]
-            ] = category
-
-        except discord.Forbidden:
-            pass
-
-    # -----------------------------
-    # CREATE CHANNELS
-    # -----------------------------
-
-    existing_channels = {
-        channel.name
-        for channel in guild.channels
-    }
-
-    for channel_data in backup["channels"]:
-
-        if channel_data["name"] in existing_channels:
-            continue
-
-        category = None
-
-        if channel_data["category"]:
-            category = existing_categories.get(
-                channel_data["category"]
-            )
-
-        try:
-
-            if channel_data["type"] == "text":
-
-                await guild.create_text_channel(
-                    channel_data["name"],
-                    category=category,
-                    topic=channel_data.get("topic"),
-                    slowmode_delay=channel_data.get(
-                        "slowmode",
-                        0
-                    ),
-                    reason="AuraGuard backup restore"
-                )
-
-            elif channel_data["type"] == "voice":
-
-                await guild.create_voice_channel(
-                    channel_data["name"],
-                    category=category,
-                    reason="AuraGuard backup restore"
-                )
-
-        except discord.Forbidden:
-            pass
-
-    await interaction.followup.send(
+    await interaction.response.send_message(
         embed=aura_embed(
-            "Backup Restored",
-            f"💾 Backup **{backup_id}** has been restored.\n\n"
-            "Existing channels and roles were left alone."
+            "Backup Restore",
+            "⚠️ **Restore is not automatic yet.**\n\n"
+            "This safety message prevents an accidental "
+            "server-wide change while we finish the "
+            "full restore system.",
+            AURA_YELLOW,
+            "⚠️"
         ),
         ephemeral=True
     )
 
 
+bot.tree.add_command(backup_group)
+
+
 # =========================================================
-# RUN BOT
+# PERSISTENT TICKET VIEWS
+# =========================================================
+
+bot.add_view(TicketView())
+bot.add_view(TicketControls())
+
+
+# =========================================================
+# START BOT
 # =========================================================
 
 bot.run(TOKEN)
