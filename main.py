@@ -1,21 +1,21 @@
 # =========================================================
-#                    AURAGUARD V8
+#                    AURAGUARD V7
 # =========================================================
-# Multi-server Discord moderation & utility bot
-#
 # Features:
-# - Multi-server / per-server settings
-# - Welcome & leave messages + welcome cards
-# - Tickets
-# - Giveaways
+# - Multi-server support
+# - Welcome & leave messages
+# - Welcome cards
+# - Tickets + claims + transcripts
+# - Giveaways + rerolls
 # - Moderation
-# - AutoMod blocked words
+# - Warnings
+# - AutoMod
+# - Anti-spam
 # - Message logging
-# - Invite tracking + invite notifications
+# - Invite tracking
+# - Invite announcements
 # - Invite leaderboard
-# - Server setup/status command
-# - Persistent buttons
-# - Safer missing channel/role handling
+# - Server & user information
 # =========================================================
 
 import discord
@@ -27,9 +27,9 @@ import json
 import random
 import asyncio
 import io
-import copy
-
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict, deque
+
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -62,6 +62,7 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.message_content = True
+intents.invites = True
 
 bot = commands.Bot(
     command_prefix="!",
@@ -86,14 +87,10 @@ DEFAULT_DATA = {
 }
 
 
-def fresh_default_data():
-    return copy.deepcopy(DEFAULT_DATA)
-
-
 def load_data():
 
     if not os.path.exists(DATA_FILE):
-        return fresh_default_data()
+        return json.loads(json.dumps(DEFAULT_DATA))
 
     try:
 
@@ -101,21 +98,26 @@ def load_data():
             DATA_FILE,
             "r",
             encoding="utf-8"
-        ) as f:
-            loaded = json.load(f)
+        ) as file:
+
+            loaded = json.load(file)
 
         for key, value in DEFAULT_DATA.items():
 
-            if key not in loaded:
-                loaded[key] = copy.deepcopy(value)
+            loaded.setdefault(key, value)
 
         return loaded
 
-    except Exception as e:
+    except Exception as error:
 
-        print("Data load error:", e)
+        print(
+            "Data load error:",
+            error
+        )
 
-        return fresh_default_data()
+        return json.loads(
+            json.dumps(DEFAULT_DATA)
+        )
 
 
 data = load_data()
@@ -131,13 +133,12 @@ def save_data():
             temp_file,
             "w",
             encoding="utf-8"
-        ) as f:
+        ) as file:
 
             json.dump(
                 data,
-                f,
-                indent=4,
-                ensure_ascii=False
+                file,
+                indent=4
             )
 
         os.replace(
@@ -145,9 +146,12 @@ def save_data():
             DATA_FILE
         )
 
-    except Exception as e:
+    except Exception as error:
 
-        print("Data save error:", e)
+        print(
+            "Data save error:",
+            error
+        )
 
 
 # =========================================================
@@ -155,6 +159,13 @@ def save_data():
 # =========================================================
 
 invite_cache = {}
+
+
+# =========================================================
+# ANTI-SPAM CACHE
+# =========================================================
+
+message_cache = defaultdict(deque)
 
 
 # =========================================================
@@ -166,6 +177,7 @@ def get_settings(guild_id):
     guild_id = str(guild_id)
 
     defaults = {
+
         # Welcome
         "welcome_enabled": False,
         "welcome_channel": None,
@@ -189,36 +201,25 @@ def get_settings(guild_id):
 
         # Invites
         "invite_channel": None,
-        "invite_notifications": True,
 
-        # Giveaways
+        # Giveaway
         "giveaway_bonus_roles": {}
     }
 
-    created = False
-
     if guild_id not in data["settings"]:
 
-        data["settings"][guild_id] = copy.deepcopy(
-            defaults
-        )
+        data["settings"][guild_id] = defaults.copy()
 
-        created = True
+        save_data()
 
     else:
 
         for key, value in defaults.items():
 
-            if key not in data["settings"][guild_id]:
-
-                data["settings"][guild_id][key] = (
-                    copy.deepcopy(value)
-                )
-
-                created = True
-
-    if created:
-        save_data()
+            data["settings"][guild_id].setdefault(
+                key,
+                value
+            )
 
     return data["settings"][guild_id]
 
@@ -227,14 +228,33 @@ def get_automod(guild_id):
 
     guild_id = str(guild_id)
 
+    defaults = {
+
+        "enabled": False,
+
+        "blocked_words": [],
+
+        "anti_spam": False,
+
+        "spam_limit": 6,
+
+        "spam_seconds": 5
+    }
+
     if guild_id not in data["automod"]:
 
-        data["automod"][guild_id] = {
-            "enabled": False,
-            "blocked_words": []
-        }
+        data["automod"][guild_id] = defaults.copy()
 
         save_data()
+
+    else:
+
+        for key, value in defaults.items():
+
+            data["automod"][guild_id].setdefault(
+                key,
+                value
+            )
 
     return data["automod"][guild_id]
 
@@ -243,20 +263,12 @@ def get_invite_data(guild_id):
 
     guild_id = str(guild_id)
 
-    if guild_id not in data["invites"]:
-
-        data["invites"][guild_id] = {}
-
-        save_data()
+    data["invites"].setdefault(
+        guild_id,
+        {}
+    )
 
     return data["invites"][guild_id]
-
-
-def setup_guild_data(guild):
-
-    get_settings(guild.id)
-    get_automod(guild.id)
-    get_invite_data(guild.id)
 
 
 # =========================================================
@@ -293,24 +305,21 @@ def aura_embed(
 def is_staff(member):
 
     if member.guild_permissions.administrator:
+
         return True
 
     if member.guild_permissions.manage_guild:
+
         return True
 
-    settings = get_settings(
+    role_id = get_settings(
         member.guild.id
-    )
+    ).get("staff_role")
 
-    role_id = settings.get(
-        "staff_role"
-    )
-
-    if not role_id:
-        return False
-
-    role = member.guild.get_role(
-        role_id
+    role = (
+        member.guild.get_role(role_id)
+        if role_id
+        else None
     )
 
     return bool(
@@ -319,7 +328,10 @@ def is_staff(member):
     )
 
 
-def apply_placeholders(text, member):
+def apply_placeholders(
+    text,
+    member
+):
 
     return (
         text
@@ -333,17 +345,20 @@ def apply_placeholders(text, member):
         )
         .replace(
             "{member_count}",
-            str(member.guild.member_count)
+            str(
+                member.guild.member_count
+            )
         )
     )
 
 
 def clean_message_content(content):
 
-    content = content or "*No text content*"
-
     return discord.utils.escape_markdown(
+
         content
+        or "*No text content*"
+
     )[:3500]
 
 
@@ -359,6 +374,7 @@ def make_unique_id(collection):
         )
 
         if item_id not in collection:
+
             return item_id
 
 
@@ -367,66 +383,41 @@ def weighted_winners(
     amount
 ):
 
-    pool = {}
+    pool = {
 
-    for user_id, weight in entries.items():
+        user_id: int(weight)
 
-        try:
+        for user_id, weight
+        in entries.items()
 
-            weight = int(weight)
+        if int(weight) > 0
+    }
 
-            if weight > 0:
-                pool[user_id] = weight
+    winners = []
 
-        except Exception:
-            continue
-
-    result = []
-
-    while (
-        pool
-        and len(result) < amount
-    ):
+    while pool and len(winners) < amount:
 
         winner = random.choices(
 
             list(pool.keys()),
 
-            weights=list(pool.values()),
+            weights=list(
+                pool.values()
+            ),
 
             k=1
 
         )[0]
 
-        result.append(winner)
-
-        pool.pop(
-            winner,
-            None
+        winners.append(
+            winner
         )
 
-    return result
+        pool.pop(
+            winner
+        )
 
-
-def get_text_channel(
-    guild,
-    channel_id
-):
-
-    if not guild or not channel_id:
-        return None
-
-    channel = guild.get_channel(
-        channel_id
-    )
-
-    if isinstance(
-        channel,
-        discord.TextChannel
-    ):
-        return channel
-
-    return None
+    return winners
 
 
 # =========================================================
@@ -443,44 +434,45 @@ async def send_log(
     if not guild:
         return
 
-    settings = get_settings(
+    channel_id = get_settings(
         guild.id
+    ).get(
+        "log_channel"
     )
 
-    channel = get_text_channel(
+    channel = (
 
-        guild,
+        guild.get_channel(channel_id)
 
-        settings.get(
-            "log_channel"
-        )
+        if channel_id
+
+        else None
     )
 
-    if not channel:
-        return
+    if isinstance(
+        channel,
+        discord.TextChannel
+    ):
 
-    try:
+        try:
 
-        await channel.send(
+            await channel.send(
 
-            embed=aura_embed(
+                embed=aura_embed(
 
-                title,
+                    title,
 
-                description[:4000],
+                    description,
 
-                color,
+                    color,
 
-                "📋"
+                    "📋"
+                )
             )
-        )
 
-    except Exception as e:
+        except Exception:
 
-        print(
-            "Log send error:",
-            e
-        )
+            pass
 
 
 async def send_message_log(
@@ -493,44 +485,45 @@ async def send_message_log(
     if not guild:
         return
 
-    settings = get_settings(
+    channel_id = get_settings(
         guild.id
+    ).get(
+        "message_log_channel"
     )
 
-    channel = get_text_channel(
+    channel = (
 
-        guild,
+        guild.get_channel(channel_id)
 
-        settings.get(
-            "message_log_channel"
-        )
+        if channel_id
+
+        else None
     )
 
-    if not channel:
-        return
+    if isinstance(
+        channel,
+        discord.TextChannel
+    ):
 
-    try:
+        try:
 
-        await channel.send(
+            await channel.send(
 
-            embed=aura_embed(
+                embed=aura_embed(
 
-                title,
+                    title,
 
-                description[:4000],
+                    description[:4000],
 
-                color,
+                    color,
 
-                "💬"
+                    "💬"
+                )
             )
-        )
 
-    except Exception as e:
+        except Exception:
 
-        print(
-            "Message log error:",
-            e
-        )
+            pass
 
 
 # =========================================================
@@ -542,21 +535,18 @@ def get_font(
     bold=False
 ):
 
-    paths = []
+    paths = [
 
-    if bold:
+        "/usr/share/fonts/truetype/dejavu/"
+        "DejaVuSans-Bold.ttf"
 
-        paths.append(
-            "/usr/share/fonts/truetype/dejavu/"
-            "DejaVuSans-Bold.ttf"
-        )
+        if bold
 
-    else:
+        else
 
-        paths.append(
-            "/usr/share/fonts/truetype/dejavu/"
-            "DejaVuSans.ttf"
-        )
+        "/usr/share/fonts/truetype/dejavu/"
+        "DejaVuSans.ttf"
+    ]
 
     for path in paths:
 
@@ -568,6 +558,7 @@ def get_font(
             )
 
         except Exception:
+
             pass
 
     return ImageFont.load_default()
@@ -606,14 +597,12 @@ async def create_welcome_card(member):
         width=5
     )
 
-    avatar_bytes = await (
-        member.display_avatar.read()
-    )
-
     avatar = Image.open(
 
         io.BytesIO(
-            avatar_bytes
+
+            await member.display_avatar.read()
+
         )
 
     ).convert(
@@ -683,9 +672,7 @@ async def create_welcome_card(member):
 
         member.guild.name[:35],
 
-        font=get_font(
-            30
-        ),
+        font=get_font(30),
 
         fill=(225, 215, 240)
     )
@@ -696,9 +683,7 @@ async def create_welcome_card(member):
 
         f"Member #{member.guild.member_count}",
 
-        font=get_font(
-            26
-        ),
+        font=get_font(26),
 
         fill=(190, 145, 255)
     )
@@ -736,9 +721,7 @@ async def send_welcome(
 
         apply_placeholders(
 
-            settings[
-                "welcome_message"
-            ],
+            settings["welcome_message"],
 
             member
         ),
@@ -755,25 +738,21 @@ async def send_welcome(
             True
         ):
 
-            welcome_file = (
-                await create_welcome_card(
-                    member
-                )
+            file = await create_welcome_card(
+                member
             )
 
             embed.set_image(
 
-                url=(
-                    "attachment://"
-                    "auraguard-welcome.png"
-                )
+                url=
+                "attachment://auraguard-welcome.png"
             )
 
             await channel.send(
 
                 embed=embed,
 
-                file=welcome_file
+                file=file
             )
 
         else:
@@ -782,21 +761,11 @@ async def send_welcome(
                 embed=embed
             )
 
-    except Exception as e:
+    except Exception:
 
-        print(
-            "Welcome card error:",
-            e
+        await channel.send(
+            embed=embed
         )
-
-        try:
-
-            await channel.send(
-                embed=embed
-            )
-
-        except Exception:
-            pass
 
 
 # =========================================================
@@ -821,9 +790,8 @@ class TicketView(
 
         emoji="🎫",
 
-        custom_id=(
-            "auraguard_open_ticket"
-        )
+        custom_id=
+        "auraguard_open_ticket"
     )
     async def open_ticket(
         self,
@@ -831,17 +799,12 @@ class TicketView(
         button
     ):
 
-        if not interaction.guild:
-
-            await interaction.response.send_message(
-                "❌ Tickets can only be used in a server.",
-                ephemeral=True
-            )
-
-            return
-
         guild = interaction.guild
+
         user = interaction.user
+
+        if not guild:
+            return
 
         settings = get_settings(
             guild.id
@@ -856,8 +819,8 @@ class TicketView(
 
                 await interaction.response.send_message(
 
-                    f"🎫 You already have a ticket: "
-                    f"{channel.mention}",
+                    f"🎫 You already have a "
+                    f"ticket: {channel.mention}",
 
                     ephemeral=True
                 )
@@ -869,33 +832,39 @@ class TicketView(
             guild.default_role:
 
                 discord.PermissionOverwrite(
+
                     view_channel=False
                 ),
 
             user:
 
                 discord.PermissionOverwrite(
+
                     view_channel=True,
+
                     send_messages=True,
+
                     read_message_history=True
                 )
         }
 
-        role = None
-
-        if settings.get(
+        role_id = settings.get(
             "staff_role"
-        ):
+        )
 
-            role = guild.get_role(
-                settings[
-                    "staff_role"
-                ]
-            )
+        role = (
+
+            guild.get_role(role_id)
+
+            if role_id
+
+            else None
+        )
 
         if role:
 
             overwrites[role] = (
+
                 discord.PermissionOverwrite(
 
                     view_channel=True,
@@ -906,74 +875,44 @@ class TicketView(
                 )
             )
 
-        category = None
-
-        if settings.get(
+        category_id = settings.get(
             "ticket_category"
-        ):
+        )
 
-            possible_category = (
-                guild.get_channel(
+        category = (
 
-                    settings[
-                        "ticket_category"
-                    ]
+            guild.get_channel(category_id)
+
+            if category_id
+
+            else None
+        )
+
+        channel = await guild.create_text_channel(
+
+            f"ticket-{user.name}".lower()[:90],
+
+            category=(
+
+                category
+
+                if isinstance(
+                    category,
+                    discord.CategoryChannel
                 )
-            )
 
-            if isinstance(
-                possible_category,
-                discord.CategoryChannel
-            ):
+                else None
+            ),
 
-                category = (
-                    possible_category
-                )
+            overwrites=overwrites,
 
-        safe_name = (
-            f"ticket-{user.name}"
-            .lower()
-            .replace(" ", "-")
-        )[:90]
+            topic=(
+                f"AURAGUARD_TICKET_OWNER="
+                f"{user.id}"
+            ),
 
-        try:
-
-            channel = (
-                await guild.create_text_channel(
-
-                    safe_name,
-
-                    category=category,
-
-                    overwrites=overwrites,
-
-                    topic=(
-                        "AURAGUARD_TICKET_OWNER="
-                        f"{user.id}"
-                    ),
-
-                    reason=(
-                        "AuraGuard ticket opened"
-                    )
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                "Ticket creation error:",
-                e
-            )
-
-            await interaction.response.send_message(
-
-                "❌ I couldn't create the ticket. "
-                "Check my channel permissions.",
-
-                ephemeral=True
-            )
-
-            return
+            reason="AuraGuard ticket opened"
+        )
 
         await channel.send(
 
@@ -983,7 +922,8 @@ class TicketView(
 
                 "Ticket Opened",
 
-                "A staff member will help you soon.\n\n"
+                "A staff member will help "
+                "you soon.\n\n"
                 "Use the buttons below.",
 
                 AURA_PURPLE,
@@ -996,7 +936,8 @@ class TicketView(
 
         await interaction.response.send_message(
 
-            f"🎫 Your ticket: {channel.mention}",
+            f"🎫 Your ticket: "
+            f"{channel.mention}",
 
             ephemeral=True
         )
@@ -1032,13 +973,15 @@ class TicketControls(
 
         emoji="🙋",
 
-        custom_id=(
-            "auraguard_claim_ticket"
-        )
+        custom_id=
+        "auraguard_claim_ticket"
     )
     async def claim_ticket(
+
         self,
+
         interaction,
+
         button
     ):
 
@@ -1048,7 +991,8 @@ class TicketControls(
 
             await interaction.response.send_message(
 
-                "❌ Only staff can claim tickets.",
+                "❌ Only staff can "
+                "claim tickets.",
 
                 ephemeral=True
             )
@@ -1067,7 +1011,8 @@ class TicketControls(
 
         if (
             current
-            and current != interaction.user.id
+            and current
+            != interaction.user.id
         ):
 
             await interaction.response.send_message(
@@ -1094,16 +1039,92 @@ class TicketControls(
             f"{interaction.user.mention}."
         )
 
-        await send_log(
+    @discord.ui.button(
 
-            interaction.guild,
+        label="Transcript",
 
-            "Ticket Claimed",
+        style=discord.ButtonStyle.secondary,
 
-            f"Staff: {interaction.user.mention}\n"
-            f"Channel: {interaction.channel.mention}",
+        emoji="📄",
 
-            AURA_GREEN
+        custom_id=
+        "auraguard_transcript"
+    )
+    async def transcript(
+
+        self,
+
+        interaction,
+
+        button
+    ):
+
+        if not is_staff(
+            interaction.user
+        ):
+
+            await interaction.response.send_message(
+
+                "❌ Only staff can create "
+                "transcripts.",
+
+                ephemeral=True
+            )
+
+            return
+
+        lines = []
+
+        async for message in (
+            interaction.channel.history(
+                oldest_first=True,
+                limit=None
+            )
+        ):
+
+            timestamp = message.created_at.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            content = (
+
+                message.content
+
+                or "[No text content]"
+            )
+
+            lines.append(
+
+                f"[{timestamp}] "
+                f"{message.author}: "
+                f"{content}"
+            )
+
+        transcript = "\n".join(
+            lines
+        )
+
+        file = discord.File(
+
+            io.BytesIO(
+                transcript.encode(
+                    "utf-8"
+                )
+            ),
+
+            filename=(
+                f"{interaction.channel.name}"
+                "-transcript.txt"
+            )
+        )
+
+        await interaction.response.send_message(
+
+            "📄 Transcript created.",
+
+            file=file,
+
+            ephemeral=True
         )
 
     @discord.ui.button(
@@ -1114,13 +1135,15 @@ class TicketControls(
 
         emoji="🔒",
 
-        custom_id=(
-            "auraguard_close_ticket"
-        )
+        custom_id=
+        "auraguard_close_ticket"
     )
     async def close_ticket(
+
         self,
+
         interaction,
+
         button
     ):
 
@@ -1130,7 +1153,8 @@ class TicketControls(
 
             await interaction.response.send_message(
 
-                "❌ Only staff can close tickets.",
+                "❌ Only staff can "
+                "close tickets.",
 
                 ephemeral=True
             )
@@ -1139,19 +1163,8 @@ class TicketControls(
 
         await interaction.response.send_message(
 
-            "🔒 Closing ticket in **3 seconds**..."
-        )
-
-        await send_log(
-
-            interaction.guild,
-
-            "Ticket Closed",
-
-            f"Staff: {interaction.user.mention}\n"
-            f"Channel: {interaction.channel.mention}",
-
-            AURA_RED
+            "🔒 Closing ticket in "
+            "**3 seconds**..."
         )
 
         await asyncio.sleep(3)
@@ -1159,29 +1172,20 @@ class TicketControls(
         data[
             "ticket_claims"
         ].pop(
+
             str(
                 interaction.channel.id
             ),
+
             None
         )
 
         save_data()
 
-        try:
+        await interaction.channel.delete(
 
-            await interaction.channel.delete(
-
-                reason=(
-                    "AuraGuard ticket closed"
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                "Ticket delete error:",
-                e
-            )
+            reason="AuraGuard ticket closed"
+        )
 
 
 # =========================================================
@@ -1208,17 +1212,28 @@ def giveaway_embed(
 
         "GIVEAWAY",
 
-        f"🎁 **Prize:** {giveaway['prize']}\n"
-        f"🏆 **Winners:** {giveaway['winners']}\n"
-        f"🆔 **Giveaway ID:** `{giveaway_id}`\n"
-        f"👥 **Participants:** {len(entries)}\n"
+        f"🎁 **Prize:** "
+        f"{giveaway['prize']}\n"
+
+        f"🏆 **Winners:** "
+        f"{giveaway['winners']}\n"
+
+        f"🆔 **Giveaway ID:** "
+        f"`{giveaway_id}`\n"
+
+        f"👥 **Participants:** "
+        f"{len(entries)}\n"
+
         f"🎟️ **Total Entries:** "
         f"{sum(entries.values())}\n"
+
         f"👤 **Hosted by:** "
         f"<@{giveaway['created_by']}>\n"
+
         f"⏰ **Ends:** "
         f"<t:{int(end.timestamp())}:R>\n\n"
-        f"**Click Participate to enter!**",
+
+        "**Click Participate to enter!**",
 
         AURA_PURPLE,
 
@@ -1239,87 +1254,45 @@ class GiveawayView(
             timeout=None
         )
 
-        self.giveaway_id = (
-            giveaway_id
-        )
+        self.giveaway_id = giveaway_id
 
-        participate_button = (
-            discord.ui.Button(
+        participate = discord.ui.Button(
 
-                label="Participate",
+            label="Participate",
 
-                emoji="🎉",
+            emoji="🎉",
 
-                style=(
-                    discord.ButtonStyle.success
-                ),
+            style=discord.ButtonStyle.success,
 
-                custom_id=(
-                    "auraguard_giveaway_enter_"
-                    f"{giveaway_id}"
-                )
+            custom_id=(
+                "auraguard_giveaway_enter_"
+                f"{giveaway_id}"
             )
         )
 
-        participate_button.callback = (
-            self.enter
-        )
+        participate.callback = self.enter
 
         self.add_item(
-            participate_button
+            participate
         )
 
-        info_button = (
-            discord.ui.Button(
+        info = discord.ui.Button(
 
-                label="Giveaway Info",
+            label="Info",
 
-                emoji="ℹ️",
+            emoji="ℹ️",
 
-                style=(
-                    discord.ButtonStyle.secondary
-                ),
+            style=discord.ButtonStyle.secondary,
 
-                custom_id=(
-                    "auraguard_giveaway_info_"
-                    f"{giveaway_id}"
-                )
+            custom_id=(
+                "auraguard_giveaway_info_"
+                f"{giveaway_id}"
             )
         )
 
-        info_button.callback = (
-            self.info
-        )
+        info.callback = self.info
 
-        self.add_item(
-            info_button
-        )
-
-        entries_button = (
-            discord.ui.Button(
-
-                label="My Entries",
-
-                emoji="🎟️",
-
-                style=(
-                    discord.ButtonStyle.primary
-                ),
-
-                custom_id=(
-                    "auraguard_giveaway_myentries_"
-                    f"{giveaway_id}"
-                )
-            )
-        )
-
-        entries_button.callback = (
-            self.my_entries
-        )
-
-        self.add_item(
-            entries_button
-        )
+        self.add_item(info)
 
     async def enter(
         self,
@@ -1336,21 +1309,8 @@ class GiveawayView(
 
             await interaction.response.send_message(
 
-                "❌ This giveaway is no longer active.",
-
-                ephemeral=True
-            )
-
-            return
-
-        if (
-            giveaway["guild"]
-            != interaction.guild.id
-        ):
-
-            await interaction.response.send_message(
-
-                "❌ This giveaway belongs to another server.",
+                "❌ This giveaway is "
+                "no longer active.",
 
                 ephemeral=True
             )
@@ -1360,7 +1320,9 @@ class GiveawayView(
         entries = data[
             "giveaway_entries"
         ].setdefault(
+
             self.giveaway_id,
+
             {}
         )
 
@@ -1372,8 +1334,9 @@ class GiveawayView(
 
             await interaction.response.send_message(
 
-                f"❌ You're already entered with "
-                f"**{entries[user_id]} entries**.",
+                f"❌ You're already entered "
+                f"with **{entries[user_id]} "
+                f"entries**.",
 
                 ephemeral=True
             )
@@ -1386,33 +1349,24 @@ class GiveawayView(
             interaction.guild.id
         )
 
-        for role_id, bonus in (
-            settings.get(
-                "giveaway_bonus_roles",
-                {}
-            ).items()
-        ):
+        for role_id, bonus in settings.get(
+            "giveaway_bonus_roles",
+            {}
+        ).items():
 
-            try:
+            role = interaction.guild.get_role(
+                int(role_id)
+            )
 
-                role = (
-                    interaction.guild.get_role(
-                        int(role_id)
-                    )
+            if (
+                role
+                and role
+                in interaction.user.roles
+            ):
+
+                amount += int(
+                    bonus
                 )
-
-                if (
-                    role
-                    and role
-                    in interaction.user.roles
-                ):
-
-                    amount += int(
-                        bonus
-                    )
-
-            except Exception:
-                continue
 
         entries[user_id] = amount
 
@@ -1420,8 +1374,8 @@ class GiveawayView(
 
         await interaction.response.send_message(
 
-            f"🎉 You're entered with **{amount} "
-            f"{'entry' if amount == 1 else 'entries'}**!",
+            f"🎉 You're entered with "
+            f"**{amount} entries**!",
 
             ephemeral=True
         )
@@ -1441,7 +1395,7 @@ class GiveawayView(
 
             await interaction.response.send_message(
 
-                "❌ This giveaway is no longer active.",
+                "❌ Giveaway no longer active.",
 
                 ephemeral=True
             )
@@ -1455,71 +1409,6 @@ class GiveawayView(
                 self.giveaway_id,
 
                 giveaway
-            ),
-
-            ephemeral=True
-        )
-
-    async def my_entries(
-        self,
-        interaction
-    ):
-
-        giveaway = data[
-            "giveaways"
-        ].get(
-            self.giveaway_id
-        )
-
-        if not giveaway:
-
-            await interaction.response.send_message(
-
-                "❌ This giveaway is no longer active.",
-
-                ephemeral=True
-            )
-
-            return
-
-        entries = data[
-            "giveaway_entries"
-        ].get(
-            self.giveaway_id,
-            {}
-        )
-
-        amount = entries.get(
-
-            str(
-                interaction.user.id
-            ),
-
-            0
-        )
-
-        end = datetime.fromisoformat(
-            giveaway["end_time"]
-        )
-
-        await interaction.response.send_message(
-
-            embed=aura_embed(
-
-                "My Giveaway Entries",
-
-                f"🎁 **Prize:** "
-                f"{giveaway['prize']}\n"
-                f"🆔 **Giveaway ID:** "
-                f"`{self.giveaway_id}`\n"
-                f"🎟️ **Your Entries:** "
-                f"**{amount}**\n"
-                f"⏰ **Ends:** "
-                f"<t:{int(end.timestamp())}:R>",
-
-                AURA_PURPLE,
-
-                "🎟️"
             ),
 
             ephemeral=True
@@ -1539,6 +1428,7 @@ async def finish_giveaway(
     )
 
     if not giveaway:
+
         return []
 
     entries = data[
@@ -1563,9 +1453,7 @@ async def finish_giveaway(
         entries
     )
 
-    history["winners_list"] = (
-        winners
-    )
+    history["winners_list"] = winners
 
     history["ended_at"] = (
         datetime.now(
@@ -1601,7 +1489,8 @@ async def finish_giveaway(
 
                 f"<@{winner}>"
 
-                for winner in winners
+                for winner
+                in winners
             )
 
             await channel.send(
@@ -1612,8 +1501,7 @@ async def finish_giveaway(
 
                     f"🎁 **Prize:** "
                     f"{history['prize']}\n\n"
-                    f"🏆 **Winner(s):** "
-                    f"{mentions}",
+                    f"🏆 {mentions}",
 
                     AURA_GREEN,
 
@@ -1629,8 +1517,8 @@ async def finish_giveaway(
 
                     "Giveaway Ended",
 
-                    f"🎁 **{history['prize']}**\n\n"
-                    f"Nobody entered.",
+                    f"🎁 **{history['prize']}**"
+                    "\n\nNobody entered.",
 
                     AURA_YELLOW,
 
@@ -1694,19 +1582,19 @@ async def welcome_setup(
         interaction.guild.id
     )
 
-    settings[
-        "welcome_channel"
-    ] = channel.id
+    settings["welcome_channel"] = (
+        channel.id
+    )
 
-    settings[
-        "welcome_message"
-    ] = message
+    settings["welcome_message"] = (
+        message
+    )
 
     save_data()
 
     await interaction.response.send_message(
 
-        f"✅ Welcome messages will be sent to "
+        f"✅ Welcome channel set to "
         f"{channel.mention}.",
 
         ephemeral=True
@@ -1766,11 +1654,9 @@ async def welcome_disable(
     interaction
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "welcome_enabled"
     ] = False
 
@@ -1786,7 +1672,7 @@ async def welcome_disable(
 
 @welcome_group.command(
     name="image",
-    description="Turn welcome image on or off."
+    description="Enable or disable welcome cards."
 )
 @app_commands.checks.has_permissions(
     manage_guild=True
@@ -1796,11 +1682,9 @@ async def welcome_image(
     enabled: bool
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "welcome_image_enabled"
     ] = enabled
 
@@ -1808,7 +1692,7 @@ async def welcome_image(
 
     await interaction.response.send_message(
 
-        f"🖼️ Welcome image "
+        f"🖼️ Welcome cards "
         f"{'enabled' if enabled else 'disabled'}.",
 
         ephemeral=True
@@ -1826,20 +1710,20 @@ async def welcome_test(
     interaction
 ):
 
-    settings = get_settings(
+    channel_id = get_settings(
         interaction.guild.id
+    ).get(
+        "welcome_channel"
     )
 
-    channel = get_text_channel(
-
-        interaction.guild,
-
-        settings.get(
-            "welcome_channel"
-        )
+    channel = interaction.guild.get_channel(
+        channel_id
     )
 
-    if not channel:
+    if not isinstance(
+        channel,
+        discord.TextChannel
+    ):
 
         await interaction.response.send_message(
 
@@ -1865,7 +1749,7 @@ async def welcome_test(
 
     await interaction.followup.send(
 
-        f"✅ Test sent to {channel.mention}.",
+        "✅ Welcome test sent.",
 
         ephemeral=True
     )
@@ -1894,19 +1778,19 @@ async def leave_setup(
         interaction.guild.id
     )
 
-    settings[
-        "leave_channel"
-    ] = channel.id
+    settings["leave_channel"] = (
+        channel.id
+    )
 
-    settings[
-        "leave_message"
-    ] = message
+    settings["leave_message"] = (
+        message
+    )
 
     save_data()
 
     await interaction.response.send_message(
 
-        f"✅ Leave messages will be sent to "
+        f"✅ Leave channel set to "
         f"{channel.mention}.",
 
         ephemeral=True
@@ -1966,11 +1850,9 @@ async def leave_disable(
     interaction
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "leave_enabled"
     ] = False
 
@@ -1979,70 +1861,6 @@ async def leave_disable(
     await interaction.response.send_message(
 
         "🔴 Leave messages disabled.",
-
-        ephemeral=True
-    )
-
-
-@leave_group.command(
-    name="test",
-    description="Test leave message."
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def leave_test(
-    interaction
-):
-
-    settings = get_settings(
-        interaction.guild.id
-    )
-
-    channel = get_text_channel(
-
-        interaction.guild,
-
-        settings.get(
-            "leave_channel"
-        )
-    )
-
-    if not channel:
-
-        await interaction.response.send_message(
-
-            "❌ Run `/leave setup` first.",
-
-            ephemeral=True
-        )
-
-        return
-
-    await channel.send(
-
-        embed=aura_embed(
-
-            "Leave Test",
-
-            apply_placeholders(
-
-                settings[
-                    "leave_message"
-                ],
-
-                interaction.user
-            ),
-
-            AURA_YELLOW,
-
-            "🚪"
-        )
-    )
-
-    await interaction.response.send_message(
-
-        "✅ Leave test sent.",
 
         ephemeral=True
     )
@@ -2064,11 +1882,9 @@ async def tickets_setup(
     category: discord.CategoryChannel
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "ticket_category"
     ] = category.id
 
@@ -2101,7 +1917,8 @@ async def tickets_panel(
             "AuraGuard Support",
 
             "Need help?\n\n"
-            "Click below to open a ticket.",
+            "Click the button below "
+            "to open a ticket.",
 
             AURA_PURPLE,
 
@@ -2113,374 +1930,17 @@ async def tickets_panel(
 
 
 # =========================================================
-# GIVEAWAY COMMANDS
-# =========================================================
-
-@giveaway_group.command(
-    name="start",
-    description="Start a giveaway."
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def giveaway_start(
-    interaction,
-    prize: str,
-    minutes: int,
-    winners: int = 1
-):
-
-    if minutes < 1:
-
-        await interaction.response.send_message(
-
-            "❌ Minutes must be at least 1.",
-
-            ephemeral=True
-        )
-
-        return
-
-    if winners < 1:
-
-        await interaction.response.send_message(
-
-            "❌ Winners must be at least 1.",
-
-            ephemeral=True
-        )
-
-        return
-
-    giveaway_id = make_unique_id(
-        data["giveaways"]
-    )
-
-    end = (
-
-        datetime.now(
-            timezone.utc
-        )
-
-        + timedelta(
-            minutes=minutes
-        )
-    )
-
-    data[
-        "giveaways"
-    ][giveaway_id] = {
-
-        "guild": interaction.guild.id,
-
-        "channel": interaction.channel.id,
-
-        "prize": prize[:250],
-
-        "winners": winners,
-
-        "end_time": end.isoformat(),
-
-        "created_by": interaction.user.id
-    }
-
-    data[
-        "giveaway_entries"
-    ][giveaway_id] = {}
-
-    save_data()
-
-    await interaction.response.send_message(
-
-        embed=giveaway_embed(
-
-            giveaway_id,
-
-            data[
-                "giveaways"
-            ][giveaway_id]
-        ),
-
-        view=GiveawayView(
-            giveaway_id
-        )
-    )
-
-
-@giveaway_group.command(
-    name="participants",
-    description="View giveaway participants."
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def giveaway_participants(
-    interaction,
-    giveaway_id: str
-):
-
-    giveaway = data[
-        "giveaways"
-    ].get(
-        giveaway_id
-    )
-
-    entries = data[
-        "giveaway_entries"
-    ].get(
-        giveaway_id
-    )
-
-    if (
-        giveaway is None
-        or entries is None
-        or giveaway["guild"]
-        != interaction.guild.id
-    ):
-
-        await interaction.response.send_message(
-
-            "❌ Active giveaway not found.",
-
-            ephemeral=True
-        )
-
-        return
-
-    if not entries:
-
-        text = "Nobody has entered yet."
-
-    else:
-
-        lines = []
-
-        for index, (
-            user_id,
-            count
-        ) in enumerate(
-            entries.items(),
-            1
-        ):
-
-            lines.append(
-
-                f"**{index}.** "
-                f"<@{user_id}> — "
-                f"**{count} entries**"
-            )
-
-        text = "\n".join(
-            lines
-        )
-
-    await interaction.response.send_message(
-
-        embed=aura_embed(
-
-            f"Giveaway Participants • "
-            f"{giveaway_id}",
-
-            f"👥 **Participants:** "
-            f"{len(entries)}\n"
-            f"🎟️ **Total Entries:** "
-            f"{sum(entries.values())}\n\n"
-            f"{text[:3500]}",
-
-            AURA_PURPLE,
-
-            "👥"
-        ),
-
-        ephemeral=True
-    )
-
-
-@giveaway_group.command(
-    name="entries",
-    description="Check your entries."
-)
-async def giveaway_entries(
-    interaction,
-    giveaway_id: str
-):
-
-    giveaway = data[
-        "giveaways"
-    ].get(
-        giveaway_id
-    )
-
-    if (
-        not giveaway
-        or giveaway["guild"]
-        != interaction.guild.id
-    ):
-
-        await interaction.response.send_message(
-
-            "❌ Active giveaway not found.",
-
-            ephemeral=True
-        )
-
-        return
-
-    amount = data[
-        "giveaway_entries"
-    ].get(
-        giveaway_id,
-        {}
-    ).get(
-        str(
-            interaction.user.id
-        ),
-        0
-    )
-
-    await interaction.response.send_message(
-
-        f"🎟️ You have **{amount} "
-        f"{'entry' if amount == 1 else 'entries'}**.",
-
-        ephemeral=True
-    )
-
-
-@giveaway_group.command(
-    name="addentries",
-    description="Give extra entries."
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def giveaway_addentries(
-    interaction,
-    giveaway_id: str,
-    member: discord.Member,
-    amount: int
-):
-
-    giveaway = data[
-        "giveaways"
-    ].get(
-        giveaway_id
-    )
-
-    if (
-        amount < 1
-        or not giveaway
-        or giveaway["guild"]
-        != interaction.guild.id
-    ):
-
-        await interaction.response.send_message(
-
-            "❌ Invalid amount or giveaway.",
-
-            ephemeral=True
-        )
-
-        return
-
-    entries = data[
-        "giveaway_entries"
-    ].setdefault(
-        giveaway_id,
-        {}
-    )
-
-    user_id = str(
-        member.id
-    )
-
-    entries[user_id] = (
-        entries.get(
-            user_id,
-            0
-        )
-        + amount
-    )
-
-    save_data()
-
-    await interaction.response.send_message(
-
-        f"➕ {member.mention} now has "
-        f"**{entries[user_id]} entries**.",
-
-        ephemeral=True
-    )
-
-
-@giveaway_group.command(
-    name="end",
-    description="End giveaway early."
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def giveaway_end(
-    interaction,
-    giveaway_id: str
-):
-
-    giveaway = data[
-        "giveaways"
-    ].get(
-        giveaway_id
-    )
-
-    if (
-        not giveaway
-        or giveaway["guild"]
-        != interaction.guild.id
-    ):
-
-        await interaction.response.send_message(
-
-            "❌ Giveaway not found.",
-
-            ephemeral=True
-        )
-
-        return
-
-    await interaction.response.defer()
-
-    channel = get_text_channel(
-
-        interaction.guild,
-
-        giveaway[
-            "channel"
-        ]
-    )
-
-    await finish_giveaway(
-
-        interaction.guild,
-
-        channel,
-
-        giveaway_id
-    )
-
-
-# =========================================================
-# INVITE COMMANDS
+# INVITE CHANNEL COMMAND
 # =========================================================
 
 @bot.tree.command(
     name="setinvitechannel",
-    description=(
-        "Set the channel for invite notifications."
-    )
+    description="Set the channel for invite announcements."
 )
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def setinvitechannel(
+async def set_invite_channel(
     interaction,
     channel: discord.TextChannel
 ):
@@ -2497,64 +1957,21 @@ async def setinvitechannel(
 
     await interaction.response.send_message(
 
-        f"📮 Invite notifications will now be "
-        f"sent to {channel.mention}.",
+        f"📮 Invite announcements will "
+        f"now be sent to "
+        f"{channel.mention}.",
 
         ephemeral=True
     )
 
 
-@bot.tree.command(
-    name="invitechannel",
-    description="Show the current invite channel."
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def invitechannel(
-    interaction
-):
-
-    settings = get_settings(
-        interaction.guild.id
-    )
-
-    channel = get_text_channel(
-
-        interaction.guild,
-
-        settings.get(
-            "invite_channel"
-        )
-    )
-
-    if channel:
-
-        message = (
-            f"📮 Invite notifications are sent to "
-            f"{channel.mention}."
-        )
-
-    else:
-
-        message = (
-            "❌ No invite channel is configured.\n"
-            "Use `/setinvitechannel`."
-        )
-
-    await interaction.response.send_message(
-
-        message,
-
-        ephemeral=True
-    )
-
+# =========================================================
+# INVITE COMMANDS
+# =========================================================
 
 @bot.tree.command(
     name="invites",
-    description=(
-        "Check your or another member's invite count."
-    )
+    description="Check invite count."
 )
 async def invites(
     interaction,
@@ -2595,8 +2012,10 @@ async def invites(
 
             f"👤 **Member:** "
             f"{member.mention}\n"
+
             f"📨 **Total Invites:** "
             f"**{total}**\n"
+
             f"✅ **Regular Invites:** "
             f"**{regular}**",
 
@@ -2609,9 +2028,7 @@ async def invites(
 
 @bot.tree.command(
     name="inviteleaderboard",
-    description=(
-        "Show the server invite leaderboard."
-    )
+    description="Show invite leaderboard."
 )
 async def invite_leaderboard(
     interaction
@@ -2625,12 +2042,11 @@ async def invite_leaderboard(
 
         invite_data.items(),
 
-        key=lambda item: (
+        key=lambda item:
             item[1].get(
                 "total",
                 0
-            )
-        ),
+            ),
 
         reverse=True
     )
@@ -2643,7 +2059,8 @@ async def invite_leaderboard(
 
                 "Invite Leaderboard",
 
-                "No invite data has been recorded yet.",
+                "No invite data has been "
+                "recorded yet.",
 
                 AURA_PURPLE,
 
@@ -2667,7 +2084,8 @@ async def invite_leaderboard(
 
             f"**{position}.** "
             f"<@{user_id}> — "
-            f"**{user_data.get('total', 0)} invites**"
+            f"**{user_data.get('total', 0)} "
+            f"invites**"
         )
 
     await interaction.response.send_message(
@@ -2676,9 +2094,7 @@ async def invite_leaderboard(
 
             "Invite Leaderboard",
 
-            "\n".join(
-                lines
-            ),
+            "\n".join(lines),
 
             AURA_PURPLE,
 
@@ -2688,7 +2104,7 @@ async def invite_leaderboard(
 
 
 # =========================================================
-# SETTINGS / STATUS
+# SETTINGS COMMANDS
 # =========================================================
 
 @bot.tree.command(
@@ -2725,16 +2141,14 @@ async def ping(
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def setstaffrole(
+async def set_staff_role(
     interaction,
     role: discord.Role
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "staff_role"
     ] = role.id
 
@@ -2756,16 +2170,14 @@ async def setstaffrole(
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def setlogchannel(
+async def set_log_channel(
     interaction,
     channel: discord.TextChannel
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "log_channel"
     ] = channel.id
 
@@ -2782,21 +2194,19 @@ async def setlogchannel(
 
 @bot.tree.command(
     name="setmessagelog",
-    description="Set message activity log."
+    description="Set message log channel."
 )
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def setmessagelog(
+async def set_message_log(
     interaction,
     channel: discord.TextChannel
 ):
 
-    settings = get_settings(
+    get_settings(
         interaction.guild.id
-    )
-
-    settings[
+    )[
         "message_log_channel"
     ] = channel.id
 
@@ -2811,108 +2221,8 @@ async def setmessagelog(
     )
 
 
-@bot.tree.command(
-    name="serverconfig",
-    description=(
-        "View AuraGuard configuration for this server."
-    )
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def serverconfig(
-    interaction
-):
-
-    guild = interaction.guild
-
-    settings = get_settings(
-        guild.id
-    )
-
-    def channel_text(key):
-
-        channel = get_text_channel(
-
-            guild,
-
-            settings.get(
-                key
-            )
-        )
-
-        return (
-            channel.mention
-            if channel
-            else "Not set"
-        )
-
-    ticket_category = None
-
-    if settings.get(
-        "ticket_category"
-    ):
-
-        ticket_category = guild.get_channel(
-
-            settings[
-                "ticket_category"
-            ]
-        )
-
-    staff_role = None
-
-    if settings.get(
-        "staff_role"
-    ):
-
-        staff_role = guild.get_role(
-
-            settings[
-                "staff_role"
-            ]
-        )
-
-    await interaction.response.send_message(
-
-        embed=aura_embed(
-
-            "Server Configuration",
-
-            f"👋 **Welcome:** "
-            f"{'🟢 Enabled' if settings.get('welcome_enabled') else '🔴 Disabled'}\n"
-            f"Channel: {channel_text('welcome_channel')}\n\n"
-
-            f"🚪 **Leave:** "
-            f"{'🟢 Enabled' if settings.get('leave_enabled') else '🔴 Disabled'}\n"
-            f"Channel: {channel_text('leave_channel')}\n\n"
-
-            f"📮 **Invite Channel:** "
-            f"{channel_text('invite_channel')}\n"
-
-            f"📋 **Mod Logs:** "
-            f"{channel_text('log_channel')}\n"
-
-            f"💬 **Message Logs:** "
-            f"{channel_text('message_log_channel')}\n"
-
-            f"🎫 **Ticket Category:** "
-            f"{ticket_category.mention if ticket_category else 'Not set'}\n"
-
-            f"🛡️ **Staff Role:** "
-            f"{staff_role.mention if staff_role else 'Not set'}",
-
-            AURA_PURPLE,
-
-            "⚙️"
-        ),
-
-        ephemeral=True
-    )
-
-
 # =========================================================
-# AUTOMOD
+# AUTOMOD COMMANDS
 # =========================================================
 
 @automod_group.command(
@@ -2926,11 +2236,9 @@ async def automod_enable(
     interaction
 ):
 
-    automod = get_automod(
+    get_automod(
         interaction.guild.id
-    )
-
-    automod[
+    )[
         "enabled"
     ] = True
 
@@ -2946,7 +2254,7 @@ async def automod_enable(
 
 @automod_group.command(
     name="disable",
-    description="Disable AutoMod."
+    description="Disable blocked-word AutoMod."
 )
 @app_commands.checks.has_permissions(
     manage_guild=True
@@ -2955,11 +2263,9 @@ async def automod_disable(
     interaction
 ):
 
-    automod = get_automod(
+    get_automod(
         interaction.guild.id
-    )
-
-    automod[
+    )[
         "enabled"
     ] = False
 
@@ -2980,7 +2286,7 @@ async def automod_disable(
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def automod_addword(
+async def automod_add_word(
     interaction,
     word: str
 ):
@@ -2995,23 +2301,22 @@ async def automod_addword(
 
         await interaction.response.send_message(
 
-            "❌ Enter a valid word.",
+            "❌ Invalid word.",
 
             ephemeral=True
         )
 
         return
 
-    existing = [
+    if word.lower() in [
 
         item.lower()
 
         for item in automod[
             "blocked_words"
         ]
-    ]
 
-    if word.lower() in existing:
+    ]:
 
         await interaction.response.send_message(
 
@@ -3024,9 +2329,7 @@ async def automod_addword(
 
     automod[
         "blocked_words"
-    ].append(
-        word
-    )
+    ].append(word)
 
     save_data()
 
@@ -3045,7 +2348,7 @@ async def automod_addword(
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def automod_removeword(
+async def automod_remove_word(
     interaction,
     word: str
 ):
@@ -3060,12 +2363,14 @@ async def automod_removeword(
 
             item
 
-            for item in automod[
+            for item
+            in automod[
                 "blocked_words"
             ]
 
             if item.lower()
             == word.lower()
+
         ),
 
         None
@@ -3075,7 +2380,7 @@ async def automod_removeword(
 
         await interaction.response.send_message(
 
-            "❌ Not on blocked list.",
+            "❌ That word is not blocked.",
 
             ephemeral=True
         )
@@ -3084,9 +2389,7 @@ async def automod_removeword(
 
     automod[
         "blocked_words"
-    ].remove(
-        match
-    )
+    ].remove(match)
 
     save_data()
 
@@ -3099,52 +2402,29 @@ async def automod_removeword(
 
 
 @automod_group.command(
-    name="list",
-    description="View blocked words."
+    name="antispam",
+    description="Enable or disable anti-spam."
 )
 @app_commands.checks.has_permissions(
     manage_guild=True
 )
-async def automod_list(
-    interaction
+async def automod_antispam(
+    interaction,
+    enabled: bool
 ):
 
-    automod = get_automod(
+    get_automod(
         interaction.guild.id
-    )
+    )[
+        "anti_spam"
+    ] = enabled
 
-    words = automod[
-        "blocked_words"
-    ]
-
-    word_text = (
-
-        "\n".join(
-
-            f"• `{word}`"
-
-            for word in words
-        )
-
-        if words
-
-        else "No blocked words."
-    )
+    save_data()
 
     await interaction.response.send_message(
 
-        embed=aura_embed(
-
-            "AutoMod Settings",
-
-            f"**Status:** "
-            f"{'🟢 Enabled' if automod['enabled'] else '🔴 Disabled'}\n\n"
-            f"{word_text}",
-
-            AURA_PURPLE,
-
-            "🛡️"
-        ),
+        f"🚨 Anti-spam "
+        f"{'enabled' if enabled else 'disabled'}.",
 
         ephemeral=True
     )
@@ -3174,7 +2454,8 @@ async def hierarchy_check(
 
         await interaction.response.send_message(
 
-            "❌ You can't moderate the server owner.",
+            "❌ You can't moderate "
+            "the server owner.",
 
             ephemeral=True
         )
@@ -3182,15 +2463,19 @@ async def hierarchy_check(
         return False
 
     if (
+
         interaction.user
         != interaction.guild.owner
+
         and member.top_role
         >= interaction.user.top_role
+
     ):
 
         await interaction.response.send_message(
 
-            "❌ That member has an equal or higher role.",
+            "❌ That member has an equal "
+            "or higher role.",
 
             ephemeral=True
         )
@@ -3198,8 +2483,7 @@ async def hierarchy_check(
         return False
 
     if (
-        interaction.guild.me
-        and member.top_role
+        member.top_role
         >= interaction.guild.me.top_role
     ):
 
@@ -3240,7 +2524,8 @@ async def kick(
 
     await interaction.response.send_message(
 
-        f"👢 Kicked {member.mention}."
+        f"👢 Kicked "
+        f"{member.mention}."
     )
 
     await send_log(
@@ -3282,7 +2567,8 @@ async def ban(
 
     await interaction.response.send_message(
 
-        f"🔨 Banned {member.mention}."
+        f"🔨 Banned "
+        f"{member.mention}."
     )
 
     await send_log(
@@ -3301,7 +2587,7 @@ async def ban(
 
 @bot.tree.command(
     name="unban",
-    description="Unban using user ID."
+    description="Unban a user using their ID."
 )
 @app_commands.checks.has_permissions(
     ban_members=True
@@ -3324,18 +2610,6 @@ async def unban(
         await interaction.response.send_message(
 
             f"🔓 **{user}** has been unbanned."
-        )
-
-        await send_log(
-
-            interaction.guild,
-
-            "Member Unbanned",
-
-            f"Member: {user}\n"
-            f"Moderator: {interaction.user}",
-
-            AURA_GREEN
         )
 
     except Exception:
@@ -3362,14 +2636,12 @@ async def timeout(
     reason: str = "No reason provided"
 ):
 
-    if (
-        minutes < 1
-        or minutes > 40320
-    ):
+    if minutes < 1 or minutes > 40320:
 
         await interaction.response.send_message(
 
-            "❌ Choose between 1 minute and 28 days.",
+            "❌ Choose between 1 minute "
+            "and 28 days.",
 
             ephemeral=True
         )
@@ -3398,24 +2670,10 @@ async def timeout(
         f"for **{minutes} minutes**."
     )
 
-    await send_log(
-
-        interaction.guild,
-
-        "Member Timed Out",
-
-        f"Member: {member}\n"
-        f"Moderator: {interaction.user}\n"
-        f"Duration: {minutes} minutes\n"
-        f"Reason: {reason}",
-
-        AURA_YELLOW
-    )
-
 
 @bot.tree.command(
     name="untimeout",
-    description="Remove timeout."
+    description="Remove a timeout."
 )
 @app_commands.checks.has_permissions(
     moderate_members=True
@@ -3425,33 +2683,20 @@ async def untimeout(
     member: discord.Member
 ):
 
-    if not await hierarchy_check(
-        interaction,
-        member
-    ):
-        return
-
     await member.timeout(
         None
     )
 
     await interaction.response.send_message(
 
-        f"🔓 Removed {member.mention}'s timeout."
+        f"🔓 Removed "
+        f"{member.mention}'s timeout."
     )
 
-    await send_log(
 
-        interaction.guild,
-
-        "Timeout Removed",
-
-        f"Member: {member}\n"
-        f"Moderator: {interaction.user}",
-
-        AURA_GREEN
-    )
-
+# =========================================================
+# WARNINGS
+# =========================================================
 
 @bot.tree.command(
     name="warn",
@@ -3466,23 +2711,18 @@ async def warn(
     reason: str = "No reason provided"
 ):
 
-    if not await hierarchy_check(
-        interaction,
-        member
-    ):
-        return
-
     warnings = data[
         "warnings"
     ].setdefault(
-        str(
-            interaction.guild.id
-        ),
+
+        str(interaction.guild.id),
+
         {}
+
     ).setdefault(
-        str(
-            member.id
-        ),
+
+        str(member.id),
+
         []
     )
 
@@ -3490,21 +2730,23 @@ async def warn(
 
         "reason": reason,
 
-        "moderator": interaction.user.id,
+        "moderator":
+            interaction.user.id,
 
-        "time": (
+        "time":
+
             datetime.now(
                 timezone.utc
             ).isoformat()
-        )
     })
 
     save_data()
 
     await interaction.response.send_message(
 
-        f"⚠️ Warned {member.mention}. "
-        f"Total warnings: **{len(warnings)}**"
+        f"⚠️ Warned {member.mention}.\n"
+        f"Total warnings: "
+        f"**{len(warnings)}**"
     )
 
     await send_log(
@@ -3514,9 +2756,9 @@ async def warn(
         "Member Warned",
 
         f"Member: {member.mention}\n"
-        f"Moderator: {interaction.user.mention}\n"
-        f"Reason: {reason}\n"
-        f"Total Warnings: {len(warnings)}",
+        f"Moderator: "
+        f"{interaction.user.mention}\n"
+        f"Reason: {reason}",
 
         AURA_YELLOW
     )
@@ -3524,7 +2766,7 @@ async def warn(
 
 @bot.tree.command(
     name="warnings",
-    description="View warnings."
+    description="View member warnings."
 )
 @app_commands.checks.has_permissions(
     moderate_members=True
@@ -3537,14 +2779,15 @@ async def warnings(
     member_warnings = data[
         "warnings"
     ].get(
-        str(
-            interaction.guild.id
-        ),
+
+        str(interaction.guild.id),
+
         {}
+
     ).get(
-        str(
-            member.id
-        ),
+
+        str(member.id),
+
         []
     )
 
@@ -3552,7 +2795,8 @@ async def warnings(
 
         await interaction.response.send_message(
 
-            f"✅ {member.mention} has no warnings.",
+            f"✅ {member.mention} "
+            f"has no warnings.",
 
             ephemeral=True
         )
@@ -3566,31 +2810,20 @@ async def warnings(
         1
     ):
 
-        reason = warning.get(
-            "reason",
-            "No reason"
-        )
-
-        moderator = warning.get(
-            "moderator"
-        )
-
         lines.append(
 
             f"**{index}.** "
-            f"{reason} — "
-            f"<@{moderator}>"
+            f"{warning['reason']} — "
+            f"<@{warning['moderator']}>"
         )
 
     await interaction.response.send_message(
 
         embed=aura_embed(
 
-            f"Warnings - {member}",
+            f"Warnings • {member}",
 
-            "\n".join(
-                lines
-            )[:4000],
+            "\n".join(lines)[:4000],
 
             AURA_YELLOW,
 
@@ -3600,6 +2833,55 @@ async def warnings(
         ephemeral=True
     )
 
+
+@bot.tree.command(
+    name="clearwarnings",
+    description="Clear all warnings."
+)
+@app_commands.checks.has_permissions(
+    moderate_members=True
+)
+async def clear_warnings(
+    interaction,
+    member: discord.Member
+):
+
+    guild_warnings = data[
+        "warnings"
+    ].setdefault(
+
+        str(interaction.guild.id),
+
+        {}
+    )
+
+    old_count = len(
+
+        guild_warnings.get(
+
+            str(member.id),
+
+            []
+        )
+    )
+
+    guild_warnings[
+        str(member.id)
+    ] = []
+
+    save_data()
+
+    await interaction.response.send_message(
+
+        f"🗑️ Cleared **{old_count}** "
+        f"warnings from "
+        f"{member.mention}."
+    )
+
+
+# =========================================================
+# MESSAGE MANAGEMENT
+# =========================================================
 
 @bot.tree.command(
     name="clear",
@@ -3613,28 +2895,11 @@ async def clear(
     amount: int
 ):
 
-    if (
-        amount < 1
-        or amount > 100
-    ):
+    if amount < 1 or amount > 100:
 
         await interaction.response.send_message(
 
-            "❌ Choose 1-100.",
-
-            ephemeral=True
-        )
-
-        return
-
-    if not isinstance(
-        interaction.channel,
-        discord.TextChannel
-    ):
-
-        await interaction.response.send_message(
-
-            "❌ This command only works in text channels.",
+            "❌ Choose between 1 and 100.",
 
             ephemeral=True
         )
@@ -3651,22 +2916,10 @@ async def clear(
 
     await interaction.followup.send(
 
-        f"🧹 Deleted **{len(deleted)} messages**.",
+        f"🧹 Deleted "
+        f"**{len(deleted)} messages**.",
 
         ephemeral=True
-    )
-
-    await send_log(
-
-        interaction.guild,
-
-        "Messages Cleared",
-
-        f"Moderator: {interaction.user.mention}\n"
-        f"Channel: {interaction.channel.mention}\n"
-        f"Messages: {len(deleted)}",
-
-        AURA_BLUE
     )
 
 
@@ -3713,18 +2966,6 @@ async def lock(
         f"🔒 {target.mention} locked."
     )
 
-    await send_log(
-
-        interaction.guild,
-
-        "Channel Locked",
-
-        f"Moderator: {interaction.user.mention}\n"
-        f"Channel: {target.mention}",
-
-        AURA_RED
-    )
-
 
 @bot.tree.command(
     name="unlock",
@@ -3769,53 +3010,352 @@ async def unlock(
         f"🔓 {target.mention} unlocked."
     )
 
-    await send_log(
 
-        interaction.guild,
+# =========================================================
+# SERVER INFO
+# =========================================================
 
-        "Channel Unlocked",
+@bot.tree.command(
+    name="serverinfo",
+    description="Show server information."
+)
+async def server_info(
+    interaction
+):
 
-        f"Moderator: {interaction.user.mention}\n"
-        f"Channel: {target.mention}",
+    guild = interaction.guild
 
-        AURA_GREEN
+    embed = aura_embed(
+
+        guild.name,
+
+        f"👑 **Owner:** "
+        f"{guild.owner.mention}\n"
+
+        f"👥 **Members:** "
+        f"{guild.member_count}\n"
+
+        f"💬 **Channels:** "
+        f"{len(guild.channels)}\n"
+
+        f"🎭 **Roles:** "
+        f"{len(guild.roles)}\n"
+
+        f"🆔 **Server ID:** "
+        f"`{guild.id}`",
+
+        AURA_PURPLE,
+
+        "🏠"
+    )
+
+    if guild.icon:
+
+        embed.set_thumbnail(
+            url=guild.icon.url
+        )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+@bot.tree.command(
+    name="userinfo",
+    description="Show member information."
+)
+async def user_info(
+    interaction,
+    member: discord.Member = None
+):
+
+    member = (
+        member
+        or interaction.user
+    )
+
+    embed = aura_embed(
+
+        "User Information",
+
+        f"👤 **User:** "
+        f"{member.mention}\n"
+
+        f"🆔 **ID:** "
+        f"`{member.id}`\n"
+
+        f"📅 **Joined Discord:** "
+        f"<t:{int(member.created_at.timestamp())}:R>\n"
+
+        f"📥 **Joined Server:** "
+        f"<t:{int(member.joined_at.timestamp())}:R>",
+
+        AURA_PURPLE,
+
+        "👤"
+    )
+
+    embed.set_thumbnail(
+        url=member.display_avatar.url
+    )
+
+    await interaction.response.send_message(
+        embed=embed
     )
 
 
 # =========================================================
-# INVITE CACHE HELPER
+# GIVEAWAY COMMANDS
 # =========================================================
 
-async def load_guild_invites(
-    guild
+@giveaway_group.command(
+    name="start",
+    description="Start a giveaway."
+)
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def giveaway_start(
+    interaction,
+    prize: str,
+    minutes: int,
+    winners: int = 1
 ):
 
-    try:
+    if minutes < 1 or winners < 1:
 
-        invites = await guild.invites()
+        await interaction.response.send_message(
 
-        invite_cache[guild.id] = {
+            "❌ Minutes and winners "
+            "must be at least 1.",
 
-            invite.code: invite.uses
-
-            for invite in invites
-        }
-
-        print(
-            f"Loaded invite cache for "
-            f"{guild.name}"
+            ephemeral=True
         )
 
-    except Exception as e:
+        return
 
-        invite_cache[
-            guild.id
-        ] = {}
+    giveaway_id = make_unique_id(
+        data["giveaways"]
+    )
 
-        print(
-            f"Could not load invites for "
-            f"{guild.name}: {e}"
+    end = (
+
+        datetime.now(
+            timezone.utc
         )
+
+        + timedelta(
+            minutes=minutes
+        )
+    )
+
+    data[
+        "giveaways"
+    ][giveaway_id] = {
+
+        "guild":
+            interaction.guild.id,
+
+        "channel":
+            interaction.channel.id,
+
+        "prize":
+            prize,
+
+        "winners":
+            winners,
+
+        "end_time":
+            end.isoformat(),
+
+        "created_by":
+            interaction.user.id
+    }
+
+    data[
+        "giveaway_entries"
+    ][giveaway_id] = {}
+
+    save_data()
+
+    await interaction.response.send_message(
+
+        embed=giveaway_embed(
+
+            giveaway_id,
+
+            data[
+                "giveaways"
+            ][giveaway_id]
+        ),
+
+        view=GiveawayView(
+            giveaway_id
+        )
+    )
+
+
+@giveaway_group.command(
+    name="end",
+    description="End giveaway early."
+)
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def giveaway_end(
+    interaction,
+    giveaway_id: str
+):
+
+    giveaway = data[
+        "giveaways"
+    ].get(
+        giveaway_id
+    )
+
+    if (
+        not giveaway
+        or giveaway["guild"]
+        != interaction.guild.id
+    ):
+
+        await interaction.response.send_message(
+
+            "❌ Giveaway not found.",
+
+            ephemeral=True
+        )
+
+        return
+
+    await interaction.response.defer()
+
+    channel = interaction.guild.get_channel(
+
+        giveaway["channel"]
+    )
+
+    await finish_giveaway(
+
+        interaction.guild,
+
+        channel
+
+        if isinstance(
+            channel,
+            discord.TextChannel
+        )
+
+        else None,
+
+        giveaway_id
+    )
+
+
+@giveaway_group.command(
+    name="reroll",
+    description="Reroll a finished giveaway."
+)
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def giveaway_reroll(
+    interaction,
+    giveaway_id: str
+):
+
+    history = data[
+        "giveaway_history"
+    ].get(
+        giveaway_id
+    )
+
+    if not history:
+
+        await interaction.response.send_message(
+
+            "❌ Giveaway history not found.",
+
+            ephemeral=True
+        )
+
+        return
+
+    entries = history.get(
+        "entries",
+        {}
+    )
+
+    previous_winners = set(
+        history.get(
+            "winners_list",
+            []
+        )
+    )
+
+    available = {
+
+        user_id: weight
+
+        for user_id, weight
+        in entries.items()
+
+        if user_id
+        not in previous_winners
+    }
+
+    if not available:
+
+        await interaction.response.send_message(
+
+            "❌ No eligible users remain.",
+
+            ephemeral=True
+        )
+
+        return
+
+    winner = weighted_winners(
+        available,
+        1
+    )
+
+    if not winner:
+
+        await interaction.response.send_message(
+
+            "❌ Could not select a winner.",
+
+            ephemeral=True
+        )
+
+        return
+
+    history[
+        "winners_list"
+    ].append(
+        winner[0]
+    )
+
+    save_data()
+
+    await interaction.response.send_message(
+
+        embed=aura_embed(
+
+            "Giveaway Reroll",
+
+            f"🎁 **Prize:** "
+            f"{history['prize']}\n\n"
+
+            f"🏆 New winner: "
+            f"<@{winner[0]}>",
+
+            AURA_GREEN,
+
+            "🎉"
+        )
+    )
 
 
 # =========================================================
@@ -3828,12 +3368,13 @@ async def on_ready():
     print("=" * 45)
 
     print(
-        f"AuraGuard V8 online as "
+        f"AuraGuard V7 online as "
         f"{bot.user}"
     )
 
     print(
-        f"Bot ID: {bot.user.id}"
+        f"Bot ID: "
+        f"{bot.user.id}"
     )
 
     print("=" * 45)
@@ -3844,26 +3385,14 @@ async def on_ready():
 
         activity=discord.Activity(
 
-            type=(
-                discord.ActivityType.watching
-            ),
+            type=
+            discord.ActivityType.watching,
 
-            name=(
-                "over your server 🛡️"
-            )
+            name=
+            "over your server 🛡️"
         )
     )
 
-    # Create data for every server
-    for guild in bot.guilds:
-
-        setup_guild_data(
-            guild
-        )
-
-    save_data()
-
-    # Persistent views
     if not getattr(
         bot,
         "_auraguard_views_loaded",
@@ -3878,11 +3407,9 @@ async def on_ready():
             TicketControls()
         )
 
-        for giveaway_id in list(
-            data[
-                "giveaways"
-            ].keys()
-        ):
+        for giveaway_id in data[
+            "giveaways"
+        ]:
 
             bot.add_view(
 
@@ -3893,14 +3420,35 @@ async def on_ready():
 
         bot._auraguard_views_loaded = True
 
-    # Invite caches
+    # Load invites for every server
     for guild in bot.guilds:
 
-        await load_guild_invites(
-            guild
-        )
+        try:
 
-    # Giveaway loop
+            invites = await guild.invites()
+
+            invite_cache[guild.id] = {
+
+                invite.code:
+                    invite.uses
+
+                for invite
+                in invites
+            }
+
+            print(
+                f"Loaded invite cache for "
+                f"{guild.name}"
+            )
+
+        except Exception as error:
+
+            print(
+
+                f"Could not load invites for "
+                f"{guild.name}: {error}"
+            )
+
     if not giveaway_loop.is_running():
 
         giveaway_loop.start()
@@ -3910,106 +3458,22 @@ async def on_ready():
         synced = await bot.tree.sync()
 
         print(
+
             f"Synced {len(synced)} "
             f"slash commands."
         )
 
-    except Exception as e:
+    except Exception as error:
 
         print(
             "Slash command sync error:",
-            e
+            error
         )
 
 
-@bot.event
-async def on_guild_join(
-    guild
-):
-
-    # Automatically create separate settings
-    # for the new server.
-    setup_guild_data(
-        guild
-    )
-
-    save_data()
-
-    await load_guild_invites(
-        guild
-    )
-
-    print(
-        f"AuraGuard joined new server: "
-        f"{guild.name} ({guild.id})"
-    )
-
-    # Try to send setup information
-    channel = None
-
-    for possible_channel in guild.text_channels:
-
-        permissions = (
-            possible_channel.permissions_for(
-                guild.me
-            )
-        )
-
-        if (
-            permissions.send_messages
-            and permissions.embed_links
-        ):
-
-            channel = possible_channel
-
-            break
-
-    if channel:
-
-        try:
-
-            await channel.send(
-
-                embed=aura_embed(
-
-                    "Thanks for adding AuraGuard!",
-
-                    "🛡️ AuraGuard is ready!\n\n"
-                    "**Recommended setup:**\n"
-                    "• `/setstaffrole`\n"
-                    "• `/setinvitechannel`\n"
-                    "• `/welcome setup`\n"
-                    "• `/leave setup`\n"
-                    "• `/tickets setup`\n"
-                    "• `/setlogchannel`\n"
-                    "• `/serverconfig`\n\n"
-                    "Use `/help` to see all commands.",
-
-                    AURA_PURPLE,
-
-                    "👋"
-                )
-            )
-
-        except Exception:
-            pass
-
-
-@bot.event
-async def on_guild_remove(
-    guild
-):
-
-    invite_cache.pop(
-        guild.id,
-        None
-    )
-
-    print(
-        f"AuraGuard left server: "
-        f"{guild.name} ({guild.id})"
-    )
-
+# =========================================================
+# MEMBER JOIN + INVITES
+# =========================================================
 
 @bot.event
 async def on_member_join(
@@ -4017,11 +3481,6 @@ async def on_member_join(
 ):
 
     guild = member.guild
-
-    # Ensure this server has data
-    setup_guild_data(
-        guild
-    )
 
     inviter = None
 
@@ -4037,16 +3496,13 @@ async def on_member_join(
         for invite in new_invites:
 
             old_uses = old_invites.get(
+
                 invite.code,
+
                 0
             )
 
-            current_uses = (
-                invite.uses
-                or 0
-            )
-
-            if current_uses > old_uses:
+            if invite.uses > old_uses:
 
                 inviter = invite.inviter
 
@@ -4054,25 +3510,21 @@ async def on_member_join(
 
         invite_cache[guild.id] = {
 
-            invite.code: (
+            invite.code:
                 invite.uses
-                or 0
-            )
 
-            for invite in new_invites
+            for invite
+            in new_invites
         }
 
-    except Exception as e:
+    except Exception as error:
 
         print(
             "Invite tracking error:",
-            e
+            error
         )
 
-    # -----------------------------------------------------
-    # SAVE INVITE DATA + SEND INVITE NOTIFICATION
-    # -----------------------------------------------------
-
+    # Invite tracking
     if (
         inviter
         and inviter.id != member.id
@@ -4082,78 +3534,60 @@ async def on_member_join(
             guild.id
         )
 
-        inviter_data = (
-            invite_data.setdefault(
+        inviter_data = invite_data.setdefault(
 
-                str(
-                    inviter.id
-                ),
+            str(inviter.id),
 
-                {
-                    "total": 0,
-                    "regular": 0
-                }
-            )
+            {
+
+                "total": 0,
+
+                "regular": 0
+            }
         )
 
-        inviter_data[
-            "total"
-        ] += 1
+        inviter_data["total"] += 1
 
-        inviter_data[
-            "regular"
-        ] += 1
+        inviter_data["regular"] += 1
 
         save_data()
 
-        settings = get_settings(
+        # SEND INVITE ANNOUNCEMENT
+        invite_channel_id = get_settings(
             guild.id
+        ).get(
+            "invite_channel"
         )
 
-        invite_channel = get_text_channel(
-
-            guild,
-
-            settings.get(
-                "invite_channel"
-            )
+        invite_channel = guild.get_channel(
+            invite_channel_id
         )
 
-        if (
-            invite_channel
-            and settings.get(
-                "invite_notifications",
-                True
-            )
+        if isinstance(
+            invite_channel,
+            discord.TextChannel
         ):
 
-            try:
+            await invite_channel.send(
 
-                await invite_channel.send(
+                embed=aura_embed(
 
-                    embed=aura_embed(
+                    "Member Invited",
 
-                        "New Member Invited!",
+                    f"👤 {member.mention} "
+                    f"joined the server!\n\n"
 
-                        f"👤 **{member.mention}** "
-                        f"was invited by "
-                        f"{inviter.mention}!\n\n"
-                        f"📨 {inviter.mention} now has "
-                        f"**{inviter_data['total']} "
-                        f"total invites!**",
+                    f"📨 **Invited by:** "
+                    f"{inviter.mention}\n"
 
-                        AURA_GREEN,
+                    f"📊 **Total Invites:** "
+                    f"**{inviter_data['total']}**",
 
-                        "📮"
-                    )
+                    AURA_PURPLE,
+
+                    "📮"
                 )
-
-            except Exception as e:
-
-                print(
-                    "Invite notification error:",
-                    e
-                )
+            )
 
         await send_log(
 
@@ -4161,8 +3595,12 @@ async def on_member_join(
 
             "Member Joined",
 
-            f"Member: {member.mention}\n"
-            f"Invited By: {inviter.mention}\n"
+            f"Member: "
+            f"{member.mention}\n"
+
+            f"Invited By: "
+            f"{inviter.mention}\n"
+
             f"Total Invites: "
             f"**{inviter_data['total']}**",
 
@@ -4177,16 +3615,15 @@ async def on_member_join(
 
             "Member Joined",
 
-            f"Member: {member.mention}\n"
+            f"Member: "
+            f"{member.mention}\n"
+
             f"Inviter: **Unknown**",
 
             AURA_GREEN
         )
 
-    # -----------------------------------------------------
-    # WELCOME MESSAGE
-    # -----------------------------------------------------
-
+    # Welcome
     settings = get_settings(
         guild.id
     )
@@ -4195,16 +3632,17 @@ async def on_member_join(
         "welcome_enabled"
     ):
 
-        channel = get_text_channel(
-
-            guild,
+        channel = guild.get_channel(
 
             settings.get(
                 "welcome_channel"
             )
         )
 
-        if channel:
+        if isinstance(
+            channel,
+            discord.TextChannel
+        ):
 
             await send_welcome(
                 member,
@@ -4212,61 +3650,59 @@ async def on_member_join(
             )
 
 
+# =========================================================
+# MEMBER LEAVE
+# =========================================================
+
 @bot.event
 async def on_member_remove(
     member
 ):
 
-    guild = member.guild
-
     settings = get_settings(
-        guild.id
+        member.guild.id
     )
 
     if settings.get(
         "leave_enabled"
     ):
 
-        channel = get_text_channel(
-
-            guild,
+        channel = member.guild.get_channel(
 
             settings.get(
                 "leave_channel"
             )
         )
 
-        if channel:
+        if isinstance(
+            channel,
+            discord.TextChannel
+        ):
 
-            try:
+            await channel.send(
 
-                await channel.send(
+                embed=aura_embed(
 
-                    embed=aura_embed(
+                    "Member Left",
 
-                        "Member Left",
+                    apply_placeholders(
 
-                        apply_placeholders(
+                        settings[
+                            "leave_message"
+                        ],
 
-                            settings[
-                                "leave_message"
-                            ],
+                        member
+                    ),
 
-                            member
-                        ),
+                    AURA_YELLOW,
 
-                        AURA_YELLOW,
-
-                        "🚪"
-                    )
+                    "🚪"
                 )
-
-            except Exception:
-                pass
+            )
 
     await send_log(
 
-        guild,
+        member.guild,
 
         "Member Left",
 
@@ -4276,6 +3712,10 @@ async def on_member_remove(
         AURA_YELLOW
     )
 
+
+# =========================================================
+# INVITE EVENTS
+# =========================================================
 
 @bot.event
 async def on_invite_create(
@@ -4289,12 +3729,11 @@ async def on_invite_create(
             invite.guild.id,
 
             {}
-        )[invite.code] = (
-            invite.uses
-            or 0
-        )
+
+        )[invite.code] = invite.uses
 
     except Exception:
+
         pass
 
 
@@ -4310,14 +3749,22 @@ async def on_invite_delete(
             invite.guild.id,
 
             {}
+
         ).pop(
+
             invite.code,
+
             None
         )
 
     except Exception:
+
         pass
 
+
+# =========================================================
+# MESSAGE EVENTS + AUTOMOD
+# =========================================================
 
 @bot.event
 async def on_message(
@@ -4328,11 +3775,94 @@ async def on_message(
         message.author.bot
         or not message.guild
     ):
+
         return
 
     automod = get_automod(
         message.guild.id
     )
+
+    # -------------------------------
+    # ANTI-SPAM
+    # -------------------------------
+
+    if automod.get(
+        "anti_spam"
+    ):
+
+        key = (
+            message.guild.id,
+            message.author.id
+        )
+
+        now = datetime.now(
+            timezone.utc
+        ).timestamp()
+
+        cache = message_cache[key]
+
+        cache.append(
+            now
+        )
+
+        spam_seconds = automod.get(
+            "spam_seconds",
+            5
+        )
+
+        while (
+            cache
+            and now - cache[0]
+            > spam_seconds
+        ):
+
+            cache.popleft()
+
+        spam_limit = automod.get(
+            "spam_limit",
+            6
+        )
+
+        if len(cache) >= spam_limit:
+
+            try:
+
+                await message.delete()
+
+            except Exception:
+
+                pass
+
+            await message.channel.send(
+
+                f"🚨 {message.author.mention}, "
+                f"please slow down.",
+
+                delete_after=5
+            )
+
+            cache.clear()
+
+            await send_log(
+
+                message.guild,
+
+                "Anti-Spam Action",
+
+                f"Member: "
+                f"{message.author.mention}\n"
+
+                f"Channel: "
+                f"{message.channel.mention}",
+
+                AURA_RED
+            )
+
+            return
+
+    # -------------------------------
+    # BLOCKED WORDS
+    # -------------------------------
 
     if automod.get(
         "enabled"
@@ -4347,32 +3877,25 @@ async def on_message(
             []
         ):
 
-            if (
-                word.lower()
-                in lower_content
-            ):
+            if word.lower() in lower_content:
 
                 try:
 
                     await message.delete()
 
                 except Exception:
+
                     pass
 
-                try:
+                await message.channel.send(
 
-                    await message.channel.send(
+                    f"⚠️ "
+                    f"{message.author.mention}, "
+                    f"that message contains "
+                    f"a blocked word.",
 
-                        f"⚠️ "
-                        f"{message.author.mention}, "
-                        f"that message contains "
-                        f"a blocked word.",
-
-                        delete_after=5
-                    )
-
-                except Exception:
-                    pass
+                    delete_after=5
+                )
 
                 await send_log(
 
@@ -4382,15 +3905,19 @@ async def on_message(
 
                     f"Member: "
                     f"{message.author.mention}\n"
+
                     f"Channel: "
                     f"{message.channel.mention}\n"
-                    f"Action: Message deleted",
+
+                    f"Blocked Word: "
+                    f"`{word}`",
 
                     AURA_RED
                 )
 
                 return
 
+    # Message logging
     await send_message_log(
 
         message.guild,
@@ -4399,9 +3926,12 @@ async def on_message(
 
         f"**Author:** "
         f"{message.author.mention}\n"
+
         f"**Channel:** "
         f"{message.channel.mention}\n\n"
+
         f"**Message:**\n"
+
         f"{clean_message_content(message.content)}"
     )
 
@@ -4419,6 +3949,7 @@ async def on_message_delete(
         message.author.bot
         or not message.guild
     ):
+
         return
 
     await send_message_log(
@@ -4429,9 +3960,12 @@ async def on_message_delete(
 
         f"**Author:** "
         f"{message.author.mention}\n"
+
         f"**Channel:** "
         f"{message.channel.mention}\n\n"
+
         f"**Deleted Message:**\n"
+
         f"{clean_message_content(message.content)}",
 
         AURA_RED
@@ -4445,11 +3979,16 @@ async def on_message_edit(
 ):
 
     if (
+
         before.author.bot
+
         or not before.guild
+
         or before.content
         == after.content
+
     ):
+
         return
 
     await send_message_log(
@@ -4460,10 +3999,13 @@ async def on_message_edit(
 
         f"**Author:** "
         f"{before.author.mention}\n"
+
         f"**Channel:** "
         f"{before.channel.mention}\n\n"
+
         f"**Before:**\n"
-        f"{clean_message_content(before.content)}\n\n"
+        f"{clean_message_content(before.content)}"
+        "\n\n"
         f"**After:**\n"
         f"{clean_message_content(after.content)}",
 
@@ -4499,13 +4041,7 @@ async def giveaway_loop():
                 ]
             )
 
-        except Exception as e:
-
-            print(
-                f"Invalid giveaway "
-                f"{giveaway_id}:",
-                e
-            )
+        except Exception:
 
             continue
 
@@ -4518,18 +4054,19 @@ async def giveaway_loop():
                 ]
             )
 
-            channel = None
+            channel = (
 
-            if guild:
-
-                channel = get_text_channel(
-
-                    guild,
+                guild.get_channel(
 
                     giveaway[
                         "channel"
                     ]
                 )
+
+                if guild
+
+                else None
+            )
 
             try:
 
@@ -4537,23 +4074,26 @@ async def giveaway_loop():
 
                     guild,
 
-                    channel,
+                    channel
+
+                    if isinstance(
+                        channel,
+                        discord.TextChannel
+                    )
+
+                    else None,
 
                     giveaway_id
                 )
 
-            except Exception as e:
+            except Exception as error:
 
                 print(
+
                     "Giveaway error:",
-                    e
+
+                    error
                 )
-
-
-@giveaway_loop.before_loop
-async def before_giveaway_loop():
-
-    await bot.wait_until_ready()
 
 
 # =========================================================
@@ -4569,7 +4109,6 @@ async def help_command(
 ):
 
     text = """
-
 **👋 Welcome**
 `/welcome setup`
 `/welcome enable`
@@ -4581,7 +4120,6 @@ async def help_command(
 `/leave setup`
 `/leave enable`
 `/leave disable`
-`/leave test`
 
 **🎫 Tickets**
 `/tickets setup`
@@ -4589,14 +4127,11 @@ async def help_command(
 
 **🎉 Giveaways**
 `/giveaway start`
-`/giveaway participants`
-`/giveaway entries`
-`/giveaway addentries`
 `/giveaway end`
+`/giveaway reroll`
 
 **📮 Invites**
 `/setinvitechannel`
-`/invitechannel`
 `/invites`
 `/inviteleaderboard`
 
@@ -4608,24 +4143,26 @@ async def help_command(
 `/untimeout`
 `/warn`
 `/warnings`
+`/clearwarnings`
 `/clear`
 `/lock`
 `/unlock`
 
-**🛡️ AutoMod**
+**🤖 AutoMod**
 `/automod enable`
 `/automod disable`
 `/automod addword`
 `/automod removeword`
-`/automod list`
+`/automod antispam`
 
 **⚙️ Settings**
 `/setstaffrole`
 `/setlogchannel`
 `/setmessagelog`
-`/serverconfig`
 
-**⚡ Other**
+**ℹ️ Information**
+`/serverinfo`
+`/userinfo`
 `/ping`
 """
 
@@ -4633,13 +4170,13 @@ async def help_command(
 
         embed=aura_embed(
 
-            "AuraGuard V8 Commands",
+            "AuraGuard V7 Commands",
 
             text,
 
             AURA_PURPLE,
 
-            "⚡"
+            "🛡️"
         ),
 
         ephemeral=True
@@ -4684,53 +4221,38 @@ async def on_app_command_error(
     )
 
     if isinstance(
+
         error,
+
         app_commands.MissingPermissions
+
     ):
 
         message = (
+
             "❌ You don't have permission "
             "to use that command."
         )
 
     elif isinstance(
+
         error,
-        app_commands.BotMissingPermissions
-    ):
 
-        missing = ", ".join(
-            error.missing_permissions
-        )
-
-        message = (
-            "❌ I am missing permissions: "
-            f"`{missing}`"
-        )
-
-    elif isinstance(
-        error,
         app_commands.TransformerError
+
     ):
 
         message = (
-            "❌ I couldn't use that channel or "
-            "member. Try selecting it again from "
-            "Discord's command options."
-        )
 
-    elif isinstance(
-        error,
-        app_commands.CommandOnCooldown
-    ):
-
-        message = (
-            "⏳ Please wait before using that "
-            "command again."
+            "❌ I couldn't use that channel "
+            "or option. Make sure you select "
+            "the correct type."
         )
 
     else:
 
         message = (
+
             "❌ Something went wrong while "
             "running that command."
         )
@@ -4756,6 +4278,7 @@ async def on_app_command_error(
             )
 
     except Exception:
+
         pass
 
 
