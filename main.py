@@ -1,4 +1,3 @@
-
 # =========================================================
 # AURAGUARD V5
 # Welcome • Tickets • Moderation • Logging • AutoMod
