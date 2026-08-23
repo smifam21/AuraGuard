@@ -269,7 +269,7 @@ class TicketControls(discord.ui.View):
         data["ticket_claims"].pop(str(interaction.channel.id), None); save_data()
         await interaction.channel.delete(reason="AuraGuard ticket closed")
 
-# ==================== GIVEAWAYS V4 ====================
+# ==================== GIVEAWAYS V6 ===================
 
 def giveaway_embed(giveaway_id, giveaway):
     entries = data["giveaway_entries"].get(giveaway_id, {})
@@ -703,7 +703,7 @@ async def unlock(interaction,channel:discord.TextChannel=None):
 
 @bot.event
 async def on_ready():
-    print("="*40);print(f"AuraGuard V4 online as {bot.user}");print(f"Bot ID: {bot.user.id}");print("="*40)
+    print("="*40);print(f"AuraGuard V5 online as {bot.user}");print(f"Bot ID: {bot.user.id}");print("="*40)
     await bot.change_presence(status=discord.Status.online,
         activity=discord.Activity(type=discord.ActivityType.watching,name="over your server 🛡️"))
     if not getattr(bot,"persistent_views",False):
