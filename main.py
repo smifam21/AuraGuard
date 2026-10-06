@@ -148,7 +148,6 @@ def is_staff(member):
     role = member.guild.get_role(role_id) if role_id else None
     return bool(role and role in member.roles)
 
-
 def apply_placeholders(text, member):
     return (
         text.replace("{user}", member.mention)
@@ -297,8 +296,7 @@ async def create_welcome_card(member):
     avatar = Image.open(io.BytesIO(await member.display_avatar.read())).convert("RGB")
     avatar = avatar.resize((190, 190))
     mask = Image.new("L", (190, 190), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 189, 189), fill=255)
-    image.paste(avatar, (70, 85), mask)
+    ImageDraw.Draw(mask).ellipse((0, 0, 189, 189), fill=255)    image.paste(avatar, (70, 85), mask)
 
     draw.text((300, 70), "WELCOME TO", font=get_font(38, True), fill=(190, 145, 255))
     draw.text((300, 125), member.display_name[:22], font=get_font(56, True), fill="white")
@@ -447,8 +445,7 @@ def get_giveaway_entries(giveaway_id):
 def weighted_winners(entries, amount, excluded=None):
     excluded = {str(x) for x in (excluded or [])}
     pool = {
-        str(user_id): max(0, int(weight))
-        for user_id, weight in entries.items()
+        str(user_id): max(0, int(weight))        for user_id, weight in entries.items()
         if int(weight) > 0 and str(user_id) not in excluded
     }
     result = []
@@ -597,7 +594,6 @@ async def finish_giveaway(guild, channel, giveaway_id):
 
     if channel is None:
         return
-
     if winners:
         winner_text = " ".join(f"<@{winner}>" for winner in winners)
         await channel.send(embed=aura_embed(
@@ -747,8 +743,7 @@ class GiveawayCustomizeModal(discord.ui.Modal, title="Customize Giveaway Message
     async def on_submit(self, interaction: discord.Interaction):
         self.view.draft["message"] = self.message.value.strip()
         await interaction.response.edit_message(
-            embed=giveaway_draft_embed(self.view.draft),
-            view=self.view
+            embed=giveaway_draft_embed(self.view.draft),            view=self.view
         )
 
 
@@ -897,8 +892,7 @@ async def giveaway_removeentries(
 @giveaway_group.command(name="bonusrole", description="Set bonus giveaway entries for a role.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def giveaway_bonusrole(
-    interaction: discord.Interaction,
-    role: discord.Role,
+    interaction: discord.Interaction,    role: discord.Role,
     amount: int
 ):
     if amount < 0:
@@ -1047,8 +1041,7 @@ class InviteChannelSelect(discord.ui.ChannelSelect):
             channel_types=[discord.ChannelType.text]
         )
 
-    async def callback(self, interaction: discord.Interaction):
-        selected_channel = self.values[0]
+    async def callback(self, interaction: discord.Interaction):        selected_channel = self.values[0]
         channel = await get_saved_text_channel(interaction.guild, selected_channel.id)
 
         if channel is None:
@@ -1199,7 +1192,6 @@ async def resetinvites(interaction, member: discord.Member):
     save_data()
     await interaction.response.send_message(f"🔄 Reset all invite data for {member.mention}.")
 
-
 # -------- SETTINGS --------
 
 @bot.tree.command(name="ping", description="Check AuraGuard latency.")
@@ -1347,7 +1339,6 @@ async def unban(interaction, user_id: str):
     except Exception:
         await interaction.response.send_message("❌ User not found or not banned.", ephemeral=True)
 
-
 @bot.tree.command(name="timeout", description="Timeout a member.")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def timeout(interaction, member: discord.Member, minutes: int, reason: str = "No reason provided"):
@@ -1371,6 +1362,372 @@ async def untimeout(interaction, member: discord.Member):
         return
     await member.timeout(None)
     await interaction.response.send_message(f"🔓 Removed {member.mention}'s timeout.")
+
+
+
+# -------- PREFIX MODERATION --------
+
+def prefix_moderation_embed(title, description="", color=AURA_PURPLE, emoji="🛡️"):
+    embed = discord.Embed(
+        title=f"{emoji} {title}",
+        description=description,
+        color=color,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text="AuraGuard • Moderation")
+    return embed
+
+
+def parse_prefix_duration(value):
+    """Parse 10m, 30s, 2h, 1d, or a plain number of minutes."""
+    value = str(value).strip().lower()
+    if not value:
+        return None
+
+    units = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+    }
+
+    try:
+        if value[-1] in units:
+            amount = float(value[:-1])
+            seconds = int(amount * units[value[-1]])
+        else:
+            seconds = int(float(value) * 60)
+    except (ValueError, TypeError):
+        return None
+
+    if seconds < 1 or seconds > 28 * 86400:
+        return None
+    return seconds
+
+
+def format_prefix_duration(seconds):
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+async def prefix_hierarchy_check(ctx, member):
+    if member == ctx.author:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Cannot Moderate User",
+            "❌ You can't moderate yourself.",
+            AURA_RED,
+            "🚫"
+        ))
+        return False
+
+    if member == ctx.guild.owner:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Cannot Moderate User",
+            "❌ The server owner can't be moderated by this command.",
+            AURA_RED,
+            "🚫"
+        ))
+        return False
+
+    if ctx.author != ctx.guild.owner and member.top_role >= ctx.author.top_role:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Cannot Moderate User",
+            "❌ That member has an equal or higher role than you.",
+            AURA_RED,
+            "🚫"
+        ))
+        return False
+
+    if ctx.guild.me and member.top_role >= ctx.guild.me.top_role:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Cannot Moderate User",
+            "❌ My role is not high enough to moderate that member.",
+            AURA_RED,
+            "🚫"
+        ))
+        return False
+
+    return True
+
+
+@bot.command(name="mute", aliases=["timeout"])
+@commands.has_permissions(moderate_members=True)
+async def prefix_mute(ctx, member: discord.Member, *args):
+    """
+    Prefix usage:
+    !mute @user <reason> <duration>
+    Examples:
+    !mute @user mogged 10m
+    !mute @user spamming 30m
+    """
+    if not args:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Missing Duration",
+            "Usage: `!mute @user <reason> <duration>`\n\n"
+            "Example: `!mute @user mogged 10m`",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    duration = parse_prefix_duration(args[-1])
+    if duration is None:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Invalid Duration",
+            "Use a duration such as **30s**, **10m**, **2h**, or **1d**.\n\n"
+            "Usage: `!mute @user <reason> <duration>`",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    if not await prefix_hierarchy_check(ctx, member):
+        return
+
+    reason = " ".join(args[:-1]).strip() or "No reason provided"
+
+    try:
+        await member.timeout(
+            discord.utils.utcnow() + timedelta(seconds=duration),
+            reason=f"{reason} | Moderator: {ctx.author}"
+        )
+    except discord.Forbidden:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Moderation Failed",
+            "❌ I don't have permission to timeout that member. "
+            "Make sure my role is above theirs.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+    except discord.HTTPException:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Moderation Failed",
+            "❌ Discord rejected the timeout request. Please try again.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+
+    duration_text = format_prefix_duration(duration)
+
+    embed = prefix_moderation_embed(
+        "User Muted",
+        "",
+        AURA_RED,
+        "🔇"
+    )
+    embed.add_field(name="User", value=member.mention, inline=False)
+    embed.add_field(name="Duration", value=duration_text, inline=True)
+    embed.add_field(name="Reason", value=reason[:1024], inline=False)
+    embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+
+    await ctx.send(embed=embed)
+
+    await send_log(
+        ctx.guild,
+        "User Muted",
+        f"User: {member.mention}\n"
+        f"Moderator: {ctx.author.mention}\n"
+        f"Duration: **{duration_text}**\n"
+        f"Reason: {reason}",
+        AURA_RED
+    )
+
+
+@bot.command(name="unmute", aliases=["untimeout"])
+@commands.has_permissions(moderate_members=True)
+async def prefix_unmute(ctx, member: discord.Member):
+    if not await prefix_hierarchy_check(ctx, member):
+        return
+
+    try:
+        await member.timeout(None, reason=f"Unmuted by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Moderation Failed",
+            "❌ I don't have permission to remove that timeout.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+
+    embed = prefix_moderation_embed("User Unmuted", "", AURA_GREEN, "🔊")
+    embed.add_field(name="User", value=member.mention, inline=False)
+    embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+    await ctx.send(embed=embed)
+
+    await send_log(
+        ctx.guild,
+        "User Unmuted",
+        f"User: {member.mention}\nModerator: {ctx.author.mention}",
+        AURA_GREEN
+    )
+
+
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+async def prefix_kick(ctx, member: discord.Member, *, reason="No reason provided"):
+    if not await prefix_hierarchy_check(ctx, member):
+        return
+
+    try:
+        await member.kick(reason=f"{reason} | Moderator: {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Moderation Failed",
+            "❌ I don't have permission to kick that member.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+
+    embed = prefix_moderation_embed("User Kicked", "", AURA_RED, "👢")
+    embed.add_field(name="User", value=member.mention, inline=False)
+    embed.add_field(name="Reason", value=reason[:1024], inline=False)
+    embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+    await ctx.send(embed=embed)
+
+    await send_log(
+        ctx.guild,
+        "User Kicked",
+        f"User: {member.mention}\nModerator: {ctx.author.mention}\nReason: {reason}",
+        AURA_RED
+    )
+
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def prefix_ban(ctx, member: discord.Member, *, reason="No reason provided"):
+    if not await prefix_hierarchy_check(ctx, member):
+        return
+
+    try:
+        await member.ban(reason=f"{reason} | Moderator: {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Moderation Failed",
+            "❌ I don't have permission to ban that member.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+
+    embed = prefix_moderation_embed("User Banned", "", AURA_RED, "🔨")
+    embed.add_field(name="User", value=member.mention, inline=False)
+    embed.add_field(name="Reason", value=reason[:1024], inline=False)
+    embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+    await ctx.send(embed=embed)
+
+    await send_log(
+        ctx.guild,
+        "User Banned",
+        f"User: {member.mention}\nModerator: {ctx.author.mention}\nReason: {reason}",
+        AURA_RED
+    )
+
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def prefix_unban(ctx, user_id: int):
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=f"Unbanned by {ctx.author}")
+    except (discord.NotFound, discord.HTTPException):
+        await ctx.send(embed=prefix_moderation_embed(
+            "User Not Found",
+            "❌ That user is not banned or the ID is invalid.",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+    except discord.Forbidden:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Moderation Failed",
+            "❌ I don't have permission to unban that user.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+
+    embed = prefix_moderation_embed("User Unbanned", "", AURA_GREEN, "🔓")
+    embed.add_field(name="User", value=f"<@{user.id}> ({user})", inline=False)
+    embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+    await ctx.send(embed=embed)
+
+    await send_log(
+        ctx.guild,
+        "User Unbanned",
+        f"User: <@{user.id}>\nModerator: {ctx.author.mention}",
+        AURA_GREEN
+    )
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    command_name = ctx.command.qualified_name if ctx.command else "command"
+
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(embed=prefix_moderation_embed(
+            "Missing Permissions",
+            "❌ You don't have the required permissions to use this command.",
+            AURA_RED,
+            "🔒"
+        ))
+        return
+
+    if isinstance(error, (commands.MissingRequiredArgument, commands.MemberNotFound)):
+        usage = {
+            "mute": "!mute @user <reason> <duration>",
+            "timeout": "!timeout @user <reason> <duration>",
+            "unmute": "!unmute @user",
+            "untimeout": "!untimeout @user",
+            "kick": "!kick @user <reason>",
+            "ban": "!ban @user <reason>",
+            "unban": "!unban <user_id>"
+        }.get(command_name, f"!{command_name} <arguments>")
+
+        await ctx.send(embed=prefix_moderation_embed(
+            "Missing User",
+            f"Usage: `{usage}`",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    if isinstance(error, commands.BadArgument):
+        await ctx.send(embed=prefix_moderation_embed(
+            "Invalid User",
+            "❌ I couldn't find that member. Mention them or use a valid user ID.",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    if isinstance(error, commands.BotMissingPermissions):
+        await ctx.send(embed=prefix_moderation_embed(
+            "Bot Missing Permissions",
+            "❌ I don't have the Discord permissions needed for that action.",
+            AURA_RED,
+            "🚫"
+        ))
+        return
+
+    print("Prefix command error:", repr(error))
+    await ctx.send(embed=prefix_moderation_embed(
+        "Command Error",
+        "❌ Something went wrong while running that command.",
+        AURA_RED,
+        "⚠️"
+    ))
 
 
 # -------- EVENTS --------
@@ -1497,7 +1854,6 @@ async def on_member_join(member):
 async def on_member_remove(member):
     guild = member.guild
     inviter_id = get_member_invites(guild.id).pop(str(member.id), None)
-
     if inviter_id:
         inviter_data = get_invite_data(guild.id).get(str(inviter_id))
         if inviter_data:
@@ -1647,8 +2003,7 @@ async def on_app_command_error(interaction, error):
         message = "❌ You don't have permission to use that command."
     elif isinstance(error, app_commands.TransformerError):
         message = (
-            "❌ That channel selection could not be processed. "
-            "Please use the channel picker again."
+            "❌ That channel selection could not be processed. "            "Please use the channel picker again."
         )
     elif isinstance(error, app_commands.CheckFailure):
         message = "❌ You don't have permission to use that command."
