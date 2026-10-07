@@ -32,7 +32,7 @@ intents.members = True
 intents.message_content = True
 intents.invites = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None, max_messages=5000)
 
 DEFAULT_DATA = {
     "settings": {},
@@ -75,6 +75,9 @@ def save_data():
 
 
 invite_cache = {}
+
+MAX_SNIPE_MESSAGES = 50
+deleted_message_cache = {}
 
 
 def get_settings(guild_id):
@@ -249,6 +252,214 @@ async def require_text_channel(interaction, channel):
     return resolved
 
 
+
+# -------- SNIPE / EVENT LOG HELPERS --------
+
+def remember_deleted_message(message):
+    if not message.guild:
+        return
+
+    guild_id = str(message.guild.id)
+    deleted_message_cache.setdefault(guild_id, [])
+
+    entry = {
+        "message_id": int(message.id),
+        "author_id": int(message.author.id),
+        "author_name": str(message.author),
+        "author_display_name": getattr(message.author, "display_name", str(message.author)),
+        "author_avatar": str(getattr(message.author.display_avatar, "url", "")),
+        "channel_id": int(message.channel.id),
+        "channel_name": getattr(message.channel, "name", "unknown"),
+        "content": message.content or "",
+        "attachments": [a.url for a in message.attachments],
+        "created_at": message.created_at.isoformat() if message.created_at else datetime.now(timezone.utc).isoformat(),
+        "deleted_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    deleted_message_cache[guild_id].insert(0, entry)
+    deleted_message_cache[guild_id] = deleted_message_cache[guild_id][:MAX_SNIPE_MESSAGES]
+
+
+def get_snipe_messages(guild_id):
+    return deleted_message_cache.setdefault(str(guild_id), [])
+
+
+def snipe_channel_text(channel):
+    return channel.mention if hasattr(channel, "mention") else f"# {getattr(channel, 'name', 'unknown')}"
+
+
+def snipe_content_text(content):
+    content = content or "*No text content*"
+    return discord.utils.escape_markdown(content)[:900]
+
+
+def make_event_log_embed(title, member, channel, description, color, emoji):
+    channel_text = snipe_channel_text(channel)
+    embed = discord.Embed(
+        title=f"{title} in {channel_text}",
+        description=description[:3900],
+        color=color,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    try:
+        embed.set_author(
+            name=getattr(member, "display_name", str(member)),
+            icon_url=str(member.display_avatar.url)
+        )
+    except Exception:
+        embed.set_author(name=str(member))
+
+    embed.set_footer(text=FOOTER)
+    embed.add_field(
+        name="ID",
+        value=f"{member.id} | <t:{int(datetime.now(timezone.utc).timestamp())}:f>",
+        inline=False
+    )
+    return embed
+
+
+class SnipeView(discord.ui.View):
+    def __init__(self, ctx, entries, page=0):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        self.entries = entries
+        self.page = page
+        self.per_page = 5
+        self.total_pages = max(1, (len(entries) + self.per_page - 1) // self.per_page)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.total_pages - 1
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "❌ Only the person who ran !snipe can use these buttons.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    def build_embed(self):
+        start = self.page * self.per_page
+        current = self.entries[start:start + self.per_page]
+
+        embed = discord.Embed(
+            title="🕵️ Deleted Messages",
+            description=f"Recent deleted messages • Page **{self.page + 1}/{self.total_pages}**",
+            color=AURA_RED,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        if not current:
+            embed.description = "There are no deleted messages stored yet."
+        else:
+            for index, entry in enumerate(current, start=start + 1):
+                content = snipe_content_text(entry.get("content"))
+                channel = f"<#{entry['channel_id']}>"
+                author = f"<@{entry['author_id']}>"
+                deleted_at = datetime.fromisoformat(entry["deleted_at"])
+                value = (
+                    f"**Author:** {author}\n"
+                    f"**Channel:** {channel}\n"
+                    f"**Message:** {content}\n"
+                    f"**Deleted:** <t:{int(deleted_at.timestamp())}:R>\n"
+                    f"**Message ID:** {entry['message_id']}"
+                )
+                if entry.get("attachments"):
+                    value += f"\n📎 **Attachments:** {len(entry['attachments'])}"
+
+                embed.add_field(
+                    name=f"{index}. {entry.get('author_display_name', entry.get('author_name', 'Unknown'))}",
+                    value=value[:1024],
+                    inline=False
+                )
+
+        embed.set_footer(text=f"AuraGuard • {len(self.entries)} stored deleted messages")
+        return embed
+
+    @discord.ui.button(label="Previous", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        self.page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        self.page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Clear", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def clear(self, interaction, button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message(
+                "❌ Only staff can clear the snipe history.",
+                ephemeral=True
+            )
+            return
+
+        deleted_message_cache[str(interaction.guild.id)] = []
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="🗑️ Snipe History Cleared",
+                description="The stored deleted-message history has been cleared.",
+                color=AURA_GREEN
+            ),
+            view=None
+        )
+
+
+@bot.command(name="snipe")
+async def prefix_snipe(ctx, page: int = 1):
+    if not ctx.guild:
+        return
+
+    if not is_staff(ctx.author):
+        await ctx.send(embed=prefix_moderation_embed(
+            "Missing Permissions",
+            "❌ You need staff permissions to use !snipe.",
+            AURA_RED,
+            "🔒"
+        ))
+        return
+
+    entries = get_snipe_messages(ctx.guild.id)
+    if not entries:
+        await ctx.send(embed=aura_embed(
+            "No Deleted Messages",
+            "There are no deleted messages stored yet.",
+            AURA_YELLOW,
+            "🕵️"
+        ))
+        return
+
+    view = SnipeView(ctx, entries, max(0, min(page - 1, (len(entries) - 1) // 5)))
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
+@bot.command(name="snipeclear")
+async def prefix_snipe_clear(ctx):
+    if not ctx.guild or not is_staff(ctx.author):
+        await ctx.send(embed=prefix_moderation_embed(
+            "Missing Permissions",
+            "❌ Only staff can clear the snipe history.",
+            AURA_RED,
+            "🔒"
+        ))
+        return
+
+    deleted_message_cache[str(ctx.guild.id)] = []
+    await ctx.send(embed=aura_embed(
+        "Snipe History Cleared",
+        "🗑️ The deleted-message history has been cleared.",
+        AURA_GREEN,
+        "🗑️"
+    ))
+
+
 # -------- LOGGING --------
 
 async def send_log(guild, title, description, color=AURA_PURPLE):
@@ -263,9 +474,11 @@ async def send_log(guild, title, description, color=AURA_PURPLE):
 
 
 async def send_message_log(guild, title, description, color=AURA_BLUE):
-    channel = await get_saved_text_channel(
-        guild, get_settings(guild.id).get("message_log_channel")
-    )
+    settings = get_settings(guild.id)
+    channel = await get_saved_text_channel(guild, settings.get("log_channel"))
+    if channel is None:
+        channel = await get_saved_text_channel(guild, settings.get("message_log_channel"))
+
     if channel:
         try:
             await channel.send(embed=aura_embed(title, description[:4000], color, "💬"))
@@ -497,7 +710,6 @@ def giveaway_embed(giveaway_id, giveaway):
         AURA_PURPLE,
         "🎉"
     )
-
 
 class GiveawayView(discord.ui.View):
     def __init__(self, giveaway_id):
@@ -997,8 +1209,7 @@ async def giveaway_end(interaction: discord.Interaction, giveaway_id: str):
 async def giveaway_reroll(
     interaction: discord.Interaction,
     giveaway_id: str,
-    winners: int = 1
-):
+    winners: int = 1):
     history = data["giveaway_history"].get(giveaway_id)
     if not history or history["guild"] != interaction.guild.id:
         await interaction.response.send_message("❌ Finished giveaway not found.", ephemeral=True)
@@ -1497,8 +1708,7 @@ async def prefix_mute(ctx, member: discord.Member, *args):
             reason=f"{reason} | Moderator: {ctx.author}"
         )
     except discord.Forbidden:
-        await ctx.send(embed=prefix_moderation_embed(
-            "Moderation Failed",
+        await ctx.send(embed=prefix_moderation_embed(            "Moderation Failed",
             "❌ I don't have permission to timeout that member. "
             "Make sure my role is above theirs.",
             AURA_RED,
@@ -1928,13 +2138,6 @@ async def on_message(message):
                 )
                 return
 
-    await send_message_log(
-        message.guild, "Message Sent",
-        f"**Author:** {message.author.mention}\n"
-        f"**Channel:** {message.channel.mention}\n\n"
-        f"**Message:**\n{clean_message_content(message.content)}"
-    )
-
     await bot.process_commands(message)
 
 
@@ -1943,13 +2146,61 @@ async def on_message_delete(message):
     if message.author.bot or not message.guild:
         return
 
-    await send_message_log(
-        message.guild, "Message Deleted",
-        f"**Author:** {message.author.mention}\n"
-        f"**Channel:** {message.channel.mention}\n\n"
-        f"**Deleted Message:**\n{clean_message_content(message.content)}",
-        AURA_RED
+    remember_deleted_message(message)
+
+    embed = make_event_log_embed(
+        "Message deleted",
+        message.author,
+        message.channel,
+        f"{clean_message_content(message.content)}\n\n"
+        f"**Message ID:** {message.id}",
+        AURA_RED,
+        "🗑️"
     )
+
+    log_channel = await get_saved_text_channel(
+        message.guild, get_settings(message.guild.id).get("log_channel")
+    )
+    if log_channel:
+        try:
+            await log_channel.send(embed=embed)
+        except Exception:
+            pass
+
+
+@bot.event
+async def on_raw_message_delete(payload):
+    cached = getattr(payload, "cached_message", None)
+    if cached is not None or not payload.guild_id:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    channel = guild.get_channel(payload.channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(payload.channel_id)
+        except Exception:
+            channel = None
+
+    log_channel = await get_saved_text_channel(
+        guild, get_settings(guild.id).get("log_channel")
+    )
+    if log_channel:
+        try:
+            embed = aura_embed(
+                "Message Deleted",
+                f"**Channel:** {snipe_channel_text(channel) if channel else f'Channel ID: {payload.channel_id}'}\n"
+                f"**Message ID:** {payload.message_id}\n\n"
+                f"*The original message was not in cache, so its author/content could not be recovered.*",
+                AURA_RED,
+                "🗑️"
+            )
+            await log_channel.send(embed=embed)
+        except Exception:
+            pass
 
 
 @bot.event
@@ -1957,14 +2208,84 @@ async def on_message_edit(before, after):
     if before.author.bot or not before.guild or before.content == after.content:
         return
 
-    await send_message_log(
-        before.guild, "Message Edited",
-        f"**Author:** {before.author.mention}\n"
-        f"**Channel:** {before.channel.mention}\n\n"
-        f"**Before:**\n{clean_message_content(before.content)}\n\n"
-        f"**After:**\n{clean_message_content(after.content)}",
-        AURA_YELLOW
+    embed = make_event_log_embed(
+        "Message edited",
+        before.author,
+        before.channel,
+        f"**Before:** {clean_message_content(before.content)}\n\n"
+        f"**+After:** {clean_message_content(after.content)}\n\n"
+        f"**Message ID:** {before.id}",
+        AURA_YELLOW,
+        "✏️"
     )
+
+    log_channel = await get_saved_text_channel(
+        before.guild, get_settings(before.guild.id).get("log_channel")
+    )
+    if log_channel:
+        try:
+            await log_channel.send(embed=embed)
+        except Exception:
+            pass
+
+
+@bot.event
+async def on_raw_message_edit(payload):
+    cached = getattr(payload, "cached_message", None)
+    if cached is not None or not payload.guild_id:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    log_channel = await get_saved_text_channel(
+        guild, get_settings(guild.id).get("log_channel")
+    )
+    if log_channel:
+        try:
+            channel = guild.get_channel(payload.channel_id)
+            channel_text = snipe_channel_text(channel) if channel else f"Channel ID: {payload.channel_id}"
+            embed = aura_embed(
+                "Message Edited",
+                f"**Channel:** {channel_text}\n"
+                f"**Message ID:** {payload.message_id}\n\n"
+                f"*The original message was not in cache, so the before/after text could not be recovered.*",
+                AURA_YELLOW,
+                "✏️"
+            )
+            await log_channel.send(embed=embed)
+        except Exception:
+            pass
+
+
+@bot.event
+async def on_bulk_message_delete(messages):
+    if not messages:
+        return
+
+    guild = messages[0].guild
+    if guild is None:
+        return
+
+    for message in messages:
+        if not message.author.bot:
+            remember_deleted_message(message)
+
+    log_channel = await get_saved_text_channel(
+        guild, get_settings(guild.id).get("log_channel")
+    )
+    if log_channel:
+        try:
+            await log_channel.send(embed=aura_embed(
+                "Messages Deleted",
+                f"🗑️ **{len(messages)} messages** were deleted in "
+                f"{snipe_channel_text(messages[0].channel)}.",
+                AURA_RED,
+                "🗑️"
+            ))
+        except Exception:
+            pass
 
 
 @tasks.loop(seconds=15)
@@ -1998,7 +2319,6 @@ for group in [welcome_group, leave_group, tickets_group, giveaway_group, automod
 @bot.tree.error
 async def on_app_command_error(interaction, error):
     print("Command error:", repr(error))
-
     if isinstance(error, app_commands.MissingPermissions):
         message = "❌ You don't have permission to use that command."
     elif isinstance(error, app_commands.TransformerError):
