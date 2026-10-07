@@ -1576,6 +1576,332 @@ async def untimeout(interaction, member: discord.Member):
 
 
 
+
+# -------- WARNING SYSTEM --------
+
+def get_warning_list(guild_id, user_id):
+    guild_id = str(guild_id)
+    user_id = str(user_id)
+    guild_warnings = data["warnings"].setdefault(guild_id, {})
+    return guild_warnings.setdefault(user_id, [])
+
+
+def next_warning_id(warnings):
+    used = {int(item.get("id", 0)) for item in warnings if str(item.get("id", "")).isdigit()}
+    warning_id = 1
+    while warning_id in used:
+        warning_id += 1
+    return warning_id
+
+
+def add_warning_record(guild_id, member_id, moderator_id, reason):
+    warnings = get_warning_list(guild_id, member_id)
+    record = {
+        "id": next_warning_id(warnings),
+        "moderator_id": int(moderator_id),
+        "reason": reason.strip() or "No reason provided",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    warnings.append(record)
+    save_data()
+    return record, warnings
+
+
+def remove_warning_record(guild_id, member_id, warning_id):
+    warnings = get_warning_list(guild_id, member_id)
+    for index, warning in enumerate(warnings):
+        if int(warning.get("id", 0)) == int(warning_id):
+            removed = warnings.pop(index)
+            if not warnings:
+                data["warnings"].setdefault(str(guild_id), {}).pop(str(member_id), None)
+            save_data()
+            return removed
+    return None
+
+
+def clear_warning_records(guild_id, member_id):
+    guild_warnings = data["warnings"].setdefault(str(guild_id), {})
+    removed = list(guild_warnings.get(str(member_id), []))
+    guild_warnings.pop(str(member_id), None)
+    save_data()
+    return removed
+
+
+def warning_history_embed(guild, member, warnings, checked_by):
+    if not warnings:
+        description = (
+            f"{member.mention} has **0 warnings**.\n\n"
+            "This user has no warnings."
+        )
+    else:
+        lines = []
+        for warning in warnings[-10:]:
+            try:
+                stamp = datetime.fromisoformat(warning["timestamp"])
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                time_text = f"<t:{int(stamp.timestamp())}:R>"
+            except Exception:
+                time_text = "Unknown time"
+
+            moderator = f"<@{warning.get('moderator_id')}>"
+            lines.append(
+                f"**#{warning.get('id', '?')}** • {time_text}\n"
+                f"👤 **Moderator:** {moderator}\n"
+                f"📝 **Reason:** {discord.utils.escape_markdown(str(warning.get('reason', 'No reason provided')))[:500]}"
+            )
+        description = "\n\n".join(lines)
+        if len(warnings) > 10:
+            description += f"\n\n*Showing the 10 most recent of {len(warnings)} warnings.*"
+
+    embed = discord.Embed(
+        title="📋 Warning History",
+        description=description,
+        color=AURA_YELLOW if warnings else AURA_GREEN,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"Checked by {checked_by} • AuraGuard")
+    try:
+        embed.set_thumbnail(url=str(member.display_avatar.url))
+    except Exception:
+        pass
+    return embed
+
+
+async def send_warning_dm(member, guild, record):
+    try:
+        await member.send(
+            embed=prefix_moderation_embed(
+                "Warning Issued",
+                f"You received a warning in **{guild.name}**.\n\n"
+                f"📝 **Reason:** {discord.utils.escape_markdown(record['reason'])[:1500]}\n"
+                f"🔢 **Warning:** #{record['id']}",
+                AURA_YELLOW,
+                "⚠️"
+            )
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+@bot.tree.command(name="warn", description="Issue a warning to a member.")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    if not await hierarchy_check(interaction, member):
+        return
+
+    record, warnings = add_warning_record(
+        interaction.guild.id,
+        member.id,
+        interaction.user.id,
+        reason
+    )
+
+    await send_warning_dm(member, interaction.guild, record)
+
+    await interaction.response.send_message(embed=aura_embed(
+        "Warning Successfully Issued",
+        f"⚠️ **Member:** {member.mention}\n"
+        f"🔢 **Warning:** **#{record['id']}**\n"
+        f"📝 **Reason:** {discord.utils.escape_markdown(record['reason'])[:1500]}\n"
+        f"📋 **Total Warnings:** **{len(warnings)}**\n\n"
+        f"The warning for {member.mention} was recorded by {interaction.user.mention}.",
+        AURA_YELLOW,
+        "⚠️"
+    ))
+
+    await send_log(
+        interaction.guild,
+        "Warning Issued",
+        f"Member: {member.mention}\nModerator: {interaction.user.mention}\n"
+        f"Warning: #{record['id']}\nReason: {record['reason']}",
+        AURA_YELLOW
+    )
+
+
+@bot.tree.command(name="warnings", description="View a member's warning history.")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warnings_slash(interaction: discord.Interaction, member: discord.Member):
+    warnings = get_warning_list(interaction.guild.id, member.id)
+    await interaction.response.send_message(
+        embed=warning_history_embed(interaction.guild, member, warnings, interaction.user.mention),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="removewarning", description="Remove one warning from a member.")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def removewarning_slash(interaction: discord.Interaction, member: discord.Member, warning_id: int):
+    if warning_id < 1:
+        await interaction.response.send_message("❌ Warning number must be at least 1.", ephemeral=True)
+        return
+
+    removed = remove_warning_record(interaction.guild.id, member.id, warning_id)
+    if removed is None:
+        await interaction.response.send_message(
+            f"❌ Warning **#{warning_id}** was not found for {member.mention}.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(embed=aura_embed(
+        "Warning Removed",
+        f"🗑️ Removed warning **#{warning_id}** from {member.mention}.\n"
+        f"🛡️ Removed by: {interaction.user.mention}",
+        AURA_GREEN,
+        "🗑️"
+    ))
+
+    await send_log(
+        interaction.guild,
+        "Warning Removed",
+        f"Member: {member.mention}\nModerator: {interaction.user.mention}\n"
+        f"Warning: #{warning_id}\nReason: {removed.get('reason', 'No reason provided')}",
+        AURA_GREEN
+    )
+
+
+@bot.tree.command(name="clearwarnings", description="Clear every warning from a member.")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def clearwarnings_slash(interaction: discord.Interaction, member: discord.Member):
+    removed = clear_warning_records(interaction.guild.id, member.id)
+    if not removed:
+        await interaction.response.send_message(
+            f"❌ {member.mention} has no warnings to clear.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(embed=aura_embed(
+        "Warnings Cleared",
+        f"🗑️ Cleared **{len(removed)} warnings** from {member.mention}.\n"
+        f"🛡️ Cleared by: {interaction.user.mention}",
+        AURA_GREEN,
+        "🗑️"
+    ))
+
+    await send_log(
+        interaction.guild,
+        "Warnings Cleared",
+        f"Member: {member.mention}\nModerator: {interaction.user.mention}\n"
+        f"Warnings removed: **{len(removed)}**",
+        AURA_GREEN
+    )
+
+
+@bot.command(name="warn")
+@commands.has_permissions(moderate_members=True)
+async def prefix_warn(ctx, member: discord.Member, *, reason="No reason provided"):
+    if not await prefix_hierarchy_check(ctx, member):
+        return
+
+    record, warnings = add_warning_record(
+        ctx.guild.id,
+        member.id,
+        ctx.author.id,
+        reason
+    )
+
+    await send_warning_dm(member, ctx.guild, record)
+
+    await ctx.send(embed=prefix_moderation_embed(
+        "Warning Successfully Issued",
+        f"⚠️ **Member:** {member.mention}\n"
+        f"🔢 **Warning:** **#{record['id']}**\n"
+        f"📝 **Reason:** {discord.utils.escape_markdown(record['reason'])[:1500]}\n"
+        f"📋 **Total Warnings:** **{len(warnings)}**\n\n"
+        f"The warning for {member.mention} was recorded by {ctx.author.mention}.",
+        AURA_YELLOW,
+        "⚠️"
+    ))
+
+    await send_log(
+        ctx.guild,
+        "Warning Issued",
+        f"Member: {member.mention}\nModerator: {ctx.author.mention}\n"
+        f"Warning: #{record['id']}\nReason: {record['reason']}",
+        AURA_YELLOW
+    )
+
+
+@bot.command(name="warnings")
+@commands.has_permissions(moderate_members=True)
+async def prefix_warnings(ctx, member: discord.Member):
+    warnings = get_warning_list(ctx.guild.id, member.id)
+    await ctx.send(
+        embed=warning_history_embed(ctx.guild, member, warnings, ctx.author.mention)
+    )
+
+
+@bot.command(name="removewarning", aliases=["delwarning", "removewarn"])
+@commands.has_permissions(moderate_members=True)
+async def prefix_removewarning(ctx, member: discord.Member, warning_id: int):
+    if warning_id < 1:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Invalid Warning",
+            "❌ Warning number must be at least 1.",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    removed = remove_warning_record(ctx.guild.id, member.id, warning_id)
+    if removed is None:
+        await ctx.send(embed=prefix_moderation_embed(
+            "Warning Not Found",
+            f"❌ Warning **#{warning_id}** was not found for {member.mention}.",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    await ctx.send(embed=prefix_moderation_embed(
+        "Warning Removed",
+        f"🗑️ Removed warning **#{warning_id}** from {member.mention}.\n"
+        f"🛡️ Removed by: {ctx.author.mention}",
+        AURA_GREEN,
+        "🗑️"
+    ))
+
+    await send_log(
+        ctx.guild,
+        "Warning Removed",
+        f"Member: {member.mention}\nModerator: {ctx.author.mention}\n"
+        f"Warning: #{warning_id}\nReason: {removed.get('reason', 'No reason provided')}",
+        AURA_GREEN
+    )
+
+
+@bot.command(name="clearwarnings", aliases=["clearwarns"])
+@commands.has_permissions(moderate_members=True)
+async def prefix_clearwarnings(ctx, member: discord.Member):
+    removed = clear_warning_records(ctx.guild.id, member.id)
+    if not removed:
+        await ctx.send(embed=prefix_moderation_embed(
+            "No Warnings",
+            f"❌ {member.mention} has no warnings to clear.",
+            AURA_YELLOW,
+            "⚠️"
+        ))
+        return
+
+    await ctx.send(embed=prefix_moderation_embed(
+        "Warnings Cleared",
+        f"🗑️ Cleared **{len(removed)} warnings** from {member.mention}.\n"
+        f"🛡️ Cleared by: {ctx.author.mention}",
+        AURA_GREEN,
+        "🗑️"
+    ))
+
+    await send_log(
+        ctx.guild,
+        "Warnings Cleared",
+        f"Member: {member.mention}\nModerator: {ctx.author.mention}\n"
+        f"Warnings removed: **{len(removed)}**",
+        AURA_GREEN
+    )
+
+
 # -------- PREFIX MODERATION --------
 
 def prefix_moderation_embed(title, description="", color=AURA_PURPLE, emoji="🛡️"):
