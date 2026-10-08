@@ -2228,7 +2228,14 @@ async def on_command_error(ctx, error):
             "untimeout": "!untimeout @user",
             "kick": "!kick @user <reason>",
             "ban": "!ban @user <reason>",
-            "unban": "!unban <user_id>"
+            "unban": "!unban <user_id>",
+            "warn": "!warn @user <reason>",
+            "warnings": "!warnings @user",
+            "removewarning": "!removewarning @user <warning_id>",
+            "delwarning": "!delwarning @user <warning_id>",
+            "removewarn": "!removewarn @user <warning_id>",
+            "clearwarnings": "!clearwarnings @user",
+            "clearwarns": "!clearwarns @user"
         }.get(command_name, f"!{command_name} <arguments>")
 
         await ctx.send(embed=prefix_moderation_embed(
