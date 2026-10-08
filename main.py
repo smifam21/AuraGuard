@@ -2238,9 +2238,32 @@ async def on_command_error(ctx, error):
             "clearwarns": "!clearwarns @user"
         }.get(command_name, f"!{command_name} <arguments>")
 
+        if command_name == "warn":
+            message = (
+                "You need to mention a member you want to warn.\n\n"
+                "**Usage:** `!warn @user <reason>`"
+            )
+        elif command_name == "warnings":
+            message = (
+                "You need to mention a member whose warning history you want to view.\n\n"
+                "**Usage:** `!warnings @user`"
+            )
+        elif command_name in {"removewarning", "delwarning", "removewarn"}:
+            message = (
+                "You need to mention a member and provide the warning ID.\n\n"
+                f"**Usage:** `{usage}`"
+            )
+        elif command_name in {"clearwarnings", "clearwarns"}:
+            message = (
+                "You need to mention a member whose warnings you want to clear.\n\n"
+                f"**Usage:** `{usage}`"
+            )
+        else:
+            message = f"Usage: `{usage}`"
+
         await ctx.send(embed=prefix_moderation_embed(
             "Missing User",
-            f"Usage: `{usage}`",
+            message,
             AURA_YELLOW,
             "⚠️"
         ))
