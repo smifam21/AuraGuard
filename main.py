@@ -32,7 +32,7 @@ intents.members = True
 intents.message_content = True
 intents.invites = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="A!", intents=intents, help_command=None)
 
 DEFAULT_DATA = {
     "settings": {},
