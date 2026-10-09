@@ -1,12 +1,16 @@
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
-# 1. Provide a fake token environment variable so main.py doesn't crash on startup
+# 1. Provide a fake token string
 os.environ["DISCORD_TOKEN"] = "offline_test_token"
 
-# 2. Import your main file safely
+# 2. Mock the Discord client login sequence BEFORE importing main
+import discord
+discord.Client.login = AsyncMock(return_value=None)
+
+# 3. Securely import your main bot file
 import main 
 
 class TestAuraGuardOffline(unittest.TestCase):
@@ -34,7 +38,6 @@ class TestAuraGuardOffline(unittest.TestCase):
 
     def test_apply_placeholders(self):
         """Verify the custom text template placeholder processor functions."""
-        # Mock a Discord Member object
         mock_member = MagicMock()
         mock_member.mention = "<@123456789>"
         mock_member.guild.name = "Aura Central"
@@ -56,11 +59,9 @@ class TestAuraGuardOffline(unittest.TestCase):
         """Test giveaway algorithmic selector mechanics logic."""
         entries = {"user_a": 10, "user_b": 0, "user_c": 5}
         
-        # user_b has 0 weight and should never win
         winners = main.weighted_winners(entries, 1)
         self.assertNotEqual(winners, ["user_b"])
         
-        # Requesting more than the active entry pool shouldn't crash the script
         overbooked_winners = main.weighted_winners(entries, 10)
         self.assertTrue(len(overbooked_winners) <= 2)
 
